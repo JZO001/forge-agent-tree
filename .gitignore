@@ -1,0 +1,12 @@
+# Planning documents (kept local only)
+PLANS/
+
+# Local launcher scripts
+*.bat
+
+# Screenshots dropped in the repository root for a live check
+/*.jpg
+/*.png
+
+# Personal Claude Code settings (permissions); the commands under .claude/ belong to the repository
+.claude/settings.local.json

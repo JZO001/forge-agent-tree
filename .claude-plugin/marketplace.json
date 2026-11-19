@@ -1,0 +1,14 @@
+{
+  "name": "forge-agent-tree",
+  "description": "Side pane for Claude Code that shows a session's agents as a live tree",
+  "owner": {
+    "name": "Zoltan Juhasz"
+  },
+  "plugins": [
+    {
+      "name": "forge-agent-tree",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

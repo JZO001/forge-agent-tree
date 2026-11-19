@@ -1,0 +1,72 @@
+{
+  "name": "forge-agent-tree",
+  "displayName": "Agent Tree // Forge",
+  "version": "0.1.0",
+  "description": "Side pane that shows the session's agents as a live tree: models, status, activity, context, advisor calls and a short event log. Switch the session's model, effort and advisor from the pane, choose what new subagents get, and switch a running one; in 23 languages.",
+  "author": {
+    "name": "Zoltan Juhasz"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/JZO001/forge-agent-tree",
+  "icon": "./.claude-plugin/icon.png",
+  "types": "./types/index.d.ts",
+  "network": {
+    "hosts": ["raw.githubusercontent.com", "github.com"]
+  },
+  "userConfig": {
+    "openOnStart": {
+      "type": "boolean",
+      "title": "Open on start",
+      "description": "Open the pane when an interactive session starts (Claude Code seats it only in a wide terminal)",
+      "default": true
+    },
+    "animate": {
+      "type": "boolean",
+      "title": "Motion",
+      "description": "The spinner while Claude works; a light running along the bars and a pulse down every line of the tree, idle too",
+      "default": true
+    },
+    "columns": {
+      "type": "number",
+      "title": "Width",
+      "description": "Columns the docked pane asks for; a width dragged by hand wins",
+      "default": 56
+    },
+    "logRows": {
+      "type": "number",
+      "title": "Log rows",
+      "description": "How many log rows the pane shows (0 to 20; the narrow view at most one); 0 hides the log",
+      "default": 5
+    },
+    "limitWarnAt": {
+      "type": "number",
+      "title": "Limits: yellow from",
+      "description": "The share (%) of the session or all-models limit from which its bar turns yellow",
+      "default": 50
+    },
+    "limitAlertAt": {
+      "type": "number",
+      "title": "Limits: red from",
+      "description": "The share (%) of the session or all-models limit from which its bar turns red; above the yellow one",
+      "default": 80
+    },
+    "bandLine": {
+      "type": "boolean",
+      "title": "Line above the prompt",
+      "description": "While the pane is closed, a line above the prompt sums up the agents, drawn as token-weather draws its own",
+      "default": true
+    },
+    "advisorSound": {
+      "type": "boolean",
+      "title": "Advisor sound",
+      "description": "A short sound at each advisor call: a chime on macOS, two beeps on Windows (through PowerShell), nothing on Linux",
+      "default": false
+    },
+    "autoUpdate": {
+      "type": "boolean",
+      "title": "Auto-update",
+      "description": "Once a day, at an interactive start, a copy installed from a marketplace reads the version on GitHub and, when it is newer, runs claude plugin update (see PRIVACY.md)",
+      "default": true
+    }
+  }
+}

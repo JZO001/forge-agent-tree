@@ -32,4 +32,4 @@ The mod sends nothing except its update check. The check is on by default and yo
 - the options, kept as `/config` keeps them;
 - a model, effort or advisor you pick in the pane: the pane runs `/model`, `/effort` or `/advisor` for you, and Claude Code saves the choice as those commands do.
 
-**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its one other local process is the Advisor sound option: on Windows, a beep through PowerShell. It is off by default.
+**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its only other local processes play its sounds, and only with the Sound option on (on by default; switch it off on the options page): PowerShell on Windows, `paplay` or `aplay` on Linux. They play the plugin's own sound files and send nothing anywhere.

@@ -1,8 +1,18 @@
-import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import { expect, mock, test as kitTest } from 'claude-code/testing'
+import type { Engine, TestBody, TestOptions } from 'claude-code/testing'
 import type { AgentInfo, On, SessionUsage, SessionUsageArgs } from 'claude-code'
 
 import { OFFER } from './fixture'
+
+/**
+ * The pane's tests read the classic look (the Forge HUD is the default, plan 08):
+ * each test gets `hud: false` unless its own options say otherwise; the HUD's own
+ * tests set `hud: true`.
+ */
+function test(name: string, a: TestOptions | TestBody, b?: TestBody): void {
+  if (typeof a === 'function') kitTest(name, { options: { hud: false } }, a)
+  else kitTest(name, { ...a, options: { hud: false, ...(a.options ?? {}) } }, b!)
+}
 
 const T0 = Date.UTC(2026, 10, 18, 13, 0, 0)
 
@@ -63,6 +73,8 @@ type World = {
    * command's exit code (0 installs the newer one).
    */
   update?: { id?: string; installed?: string; latest?: string; exit?: number }
+  /** The plugin's folder, as `$.process.hookEnv()` names it (`CLAUDE_PLUGIN_ROOT`); none when not given. */
+  pluginRoot?: string
 }
 
 
@@ -161,6 +173,7 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
     }
   })
   mock.env(on, world.env ?? {})
+  on('process.hookEnv', () => ({ value: (world.pluginRoot ? { CLAUDE_PLUGIN_ROOT: world.pluginRoot } : {}) as Record<string, string> }))
   on('config.list', () => ({
     value: [
       { key: 'model', label: 'Model', kind: 'choice' as const, value: world.modelSetting ?? 'opus', options: OFFER, provider: { plugin: 'engine', tier: 'core' as const }, isLocked: false },
@@ -901,14 +914,14 @@ test('the option turns the line off', { options: { bandLine: false } }, async ($
   await ui.unmount()
 })
 
-test('an advisor call makes no sound by default', async ($, on) => {
+test('by default an advisor call and a new agent make no sound; the power-up does', async ($, on) => {
   const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toEqual([])
+  expect(sounds).toEqual(['play sounds/boot.wav'])
 })
 
-test('with the option on, macOS plays the chime, once for calls close together', { options: { advisorSound: true } }, async ($, on) => {
+test('with the advisor’s sound on, macOS plays the uplink, once for calls close together', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
   const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' }
   const { clock, sounds } = await session($, on, [], world)
   await step($, undefined, 'high')
@@ -920,19 +933,92 @@ test('with the option on, macOS plays the chime, once for calls close together',
   expect(sounds).toHaveLength(1)
 })
 
-test('on Windows the option beeps through PowerShell', { options: { advisorSound: true } }, async ($, on) => {
+test('on Windows PowerShell plays the sound file from the plugin’s folder', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', pluginRoot: 'C:\\plugins\\forge' })
+  await step($, undefined, 'high')
+  await clock.advance(500)
+  expect(sounds).toEqual(["run powershell.exe -NoProfile -NonInteractive -Command (New-Object System.Media.SoundPlayer 'C:\\plugins\\forge\\sounds\\advisor.wav').PlaySync()"])
+})
+
+test('on Windows with no plugin folder to read, the event beeps its tune instead', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
   const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT' })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toHaveLength(1)
-  expect(sounds[0]).toMatch(/^run powershell\.exe -NoProfile -NonInteractive -Command \[console\]::beep/)
+  expect(sounds).toEqual(['run powershell.exe -NoProfile -NonInteractive -Command [console]::beep(1319,70); [console]::beep(1976,90)'])
 })
 
-test('on Linux the option plays nothing', { options: { advisorSound: true } }, async ($, on) => {
-  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux' })
+test('on Linux paplay plays the sound file', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', pluginRoot: '/opt/forge' })
+  await step($, undefined, 'high')
+  await clock.advance(500)
+  expect(sounds).toEqual(['run paplay /opt/forge/sounds/advisor.wav'])
+})
+
+test('the power-up sounds when the pane opens at the start; with its switch on, the deployed agent too', { options: { soundSpawn: true } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
+  await clock.advance(1000)
+  expect(sounds).toEqual(['play sounds/boot.wav', 'play sounds/spawn.wav'])
+})
+
+test('an options change reloads the plugin with the pane already open: the power-up does not sound again', { options: { sound: true, soundSpawn: false } }, async ($, on) => {
+  const shown = [{ id: 'forge-tree', title: 'Agent Tree // Forge', isShown: true, isFocused: false, isPlaced: true }]
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin', panes: shown })
+  await clock.advance(1000)
+  expect(sounds).toEqual([])
+})
+
+test('the HUD is the pane’s look by default: its boot sequence at the first opening, then its title bar and its rails', { options: { hud: true } }, async ($, on) => {
+  const { clock } = await session($, on)
+  // the boot sequence runs at the first opening: the title types itself in, the systems report
+  const booting = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await booting.find({ text: /^◢◤ AGENT TREE/ })).toBeDefined()
+  expect(await booting.find({ text: /^┌ CORE ┄+┐$/ })).toBeUndefined()
+  await booting.unmount()
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^◢◤ AGENT TREE \/\/ FORGE ━+ ◉ NOMINAL ▾en$/ })).toBeDefined()
+  expect(await ui.find({ text: /^┌ CORE ┄+┐$/ })).toBeDefined()
+  expect(await ui.find({ text: /^⬢ main/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('in the HUD a panel unfolds as it opens, then stands whole', { options: { hud: true } }, async ($, on) => {
+  const { clock } = await session($, on)
+  // past the boot sequence of the first opening
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'picker:model' })
+  expect(await ui.find({ text: /^┏━━ SESSION MODEL/ })).toBeDefined()
+  expect(await ui.find({ key: 'choose:model:opusplan' })).toBeUndefined()
+  await clock.advance(1000)
+  expect(await ui.find({ key: 'choose:model:opusplan' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('with Sound off nothing sounds, but the sounds page plays each one to hear it', { options: { sound: false } }, async ($, on) => {
+  const { clock, sounds, configSets } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
   await step($, undefined, 'high')
   await clock.advance(500)
   expect(sounds).toEqual([])
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  // the options page: the switch for them all, and the row to the sounds page with how many are on
+  expect(await ui.find({ text: /^Sound +off$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Sound events +6\/8 ▸$/ })).toBeDefined()
+  await ui.press({ key: 'sounds' })
+  expect(await ui.find({ text: /^Sounds$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Turn complete +► +on$/ })).toBeDefined()
+  await ui.press({ key: 'test:turn' })
+  await clock.advance(10)
+  expect(sounds).toEqual(['play sounds/turn.wav'])
+  await ui.press({ key: 'option:soundTurn' })
+  expect(configSets).toEqual([{ key: 'forge-agent-tree.soundTurn', value: false }])
+  // o goes back to the options page, and from there to the tree
+  await ui.press({ key: 'key-options' })
+  expect(await ui.find({ text: /^Options$/ })).toBeDefined()
+  await ui.press({ key: 'key-options' })
+  expect(await ui.find({ text: /Find auth handlers/ })).toBeDefined()
+  await ui.unmount()
 })
 
 /** A workflow agent's spawn, as a run's `agent()` raises it (checked live, plan 05). */
@@ -1024,12 +1110,12 @@ test('o opens the options page; a press sets the option as /config would; a lock
   const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
   await ui.press({ key: 'key-options' })
   expect(await ui.find({ text: /^Options$/ })).toBeDefined()
-  expect(await ui.find({ text: /Advisor sound +off/ })).toBeDefined()
-  await ui.press({ key: 'option:advisorSound' })
+  expect(await ui.find({ text: /^Sound +on$/ })).toBeDefined()
+  await ui.press({ key: 'option:sound' })
   await ui.press({ key: 'option:logRows:up' })
   await ui.press({ key: 'option:columns:down' })
   expect(configSets).toEqual([
-    { key: 'forge-agent-tree.advisorSound', value: true },
+    { key: 'forge-agent-tree.sound', value: false },
     { key: 'forge-agent-tree.logRows', value: 6 },
     { key: 'forge-agent-tree.columns', value: 52 },
   ])

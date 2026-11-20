@@ -231,7 +231,8 @@ export function brighter(color: string | undefined): string {
 export type LimitThresholds = { warn: number; alert: number }
 
 /** The thresholds the options start from: yellow from 50%, red from 80%. */
-export const LIMIT_THRESHOLDS: LimitThresholds = { warn: 50, alert: 80 }
+/** Where a limit's bar turns yellow and red, and the HUD's lamp CAUTION and CRITICAL: 60% and 90% (the user's defaults of 2026-11-20; options). */
+export const LIMIT_THRESHOLDS: LimitThresholds = { warn: 60, alert: 90 }
 
 /** A rate limit's share as a traffic light: green, yellow from `warn` (50%), red from `alert` (80%). */
 export function limitColor(p: number, t: LimitThresholds = LIMIT_THRESHOLDS): string {

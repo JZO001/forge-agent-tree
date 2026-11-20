@@ -13,6 +13,8 @@ The mod watches. It changes something only when you pick it in the pane:
 
 Every other hook passes its event on unchanged, and it makes no model calls. Its one network call is its own update check, once a day, which you can switch off (see [Updates](#updates) and [PRIVACY.md](PRIVACY.md)).
 
+It comes in a sci-fi look, the **Forge HUD**: a title bar with a status lamp, labelled rails between the groups, LED bars, the main session as a violet core at the tree's root, panels in corner brackets, a neon palette and a navy plate on a dark theme. And it moves: a comet runs down every line of the tree, the core beats while Claude works, new log rows type themselves in, a new agent's name materialises, a finished one flashes, a failed one glitches, panels unfold, a scan line passes, a radar sweeps an empty tree, and the pane boots up the first time it opens. The classic look is one option away, and the Motion option stills all of it. It can also play **sci-fi sounds** for what happens: an advisor call, an agent starting, finishing, failing or waiting, the end of a turn, a red alert, the pane powering up. They are on by default, but for the advisor's call and a new agent's start; every one has its own switch.
+
 Built and tested with Claude Code 2.1.328. The mods API it runs on is early access and may change between releases.
 
 ## Install
@@ -39,7 +41,7 @@ Inside a session:
   - The `main` row goes back to the conversation.
   - `f` shows or hides finished agents.
   - `l` shows or hides the log. Both `f` and `l` are remembered for the next sessions.
-  - `o` opens the options page: every option of the mod, switched or stepped with a press (`on`/`off`, `− 5 +`), and the language. The choices go into Claude Code's settings, as `/config` saves them, for every session.
+  - `o` opens the options page: every option of the mod, switched or stepped with a press (`on`/`off`, `− 5 +`), and the language. The choices go into Claude Code's settings, as `/config` saves them, for every session. Its `Sound events ▸` row opens the sounds page: each sound with `►` to hear it now and its own switch.
   - `h` opens the legend; it also says how to close the pane (`/tree close`) and open it again (`/tree`).
 - `▾Opus 5.5 · ▾xhigh` in the second row: press the model or the effort to pick another in a panel under the header. The pane runs `/model` or `/effort` for you, so Claude Code also saves the choice as the default for new sessions, as it does when you type them. Until it has taken effect the row shows it pending (`→ Sonnet`).
 - `◆ ▾Fable 5.2 advisor`: press it to choose the advisor (Fable, Opus, Sonnet) or turn it off; the pane runs `/advisor` for you.
@@ -65,7 +67,7 @@ Inside a session:
 | `▲ +23.7k` / `▼` | how the context grew or shrank over the last main turn (a compaction shrinks it) |
 | `~` | the context share is a local estimate: right after a start, a `/resume`, a `/clear` or a compaction, until the first reply measures it |
 | `≈$` | client-side cost estimate, not the bill |
-| `session` / `all` | the plan's usage, a row a window (the session's 5 hours; the week's, which counts every model's use): a bar and the share used (green, yellow from 50%, red from 80%), then when it resets, the local time (another day by its name: `Friday 18:12`) and how long until (`resets 16:24 · in 2h12m`). Narrow panes name them `5h` and `7d`. The rows appear once a response has reported the limits, and only on a subscription; from a session's start the last known ones show, marked `~` (windows already reset left out), until a response confirms them. A /resume or /clear keeps them: they are the account's, not the session's |
+| `session` / `all` | the plan's usage, a row a window (the session's 5 hours; the week's, which counts every model's use): a bar and the share used (green, yellow from 60%, red from 90%; both are options), then when it resets, the local time (another day by its name: `Friday 18:12`) and how long until (`resets 16:24 · in 2h12m`). Narrow panes name them `5h` and `7d`. The rows appear once a response has reported the limits, and only on a subscription; from a session's start the last known ones show, marked `~` (windows already reset left out), until a response confirms them. A /resume or /clear keeps them: they are the account's, not the session's |
 | `▾en` | the pane's language; press it to choose one of 23 |
 | `▾Opus 5.5` / `▾xhigh` | the session's model and effort; press to change them (runs `/model` / `/effort`) |
 | `→ Sonnet` | a model or effort the pane asked for, until it has taken effect |
@@ -85,12 +87,13 @@ These are set on the pane's options page (`o`) or from `/config`; both save them
 | Option | Default | |
 |---|---|---|
 | Open on start | on | Open the pane when an interactive session starts |
+| Forge HUD | on | The sci-fi look; off: the classic look. On a light or ANSI theme it keeps Claude Code's named colors and draws no plate |
 | Motion | on | The spinner while Claude works; a light running along the bars of three cells or more, and a pulse down every line of the tree, idle too. Claude Code's reduced-motion setting turns it off too |
 | Width | 56 | Columns the docked pane asks for; a width dragged by hand wins |
 | Log rows | 5 | How many log rows the pane shows (0 to 20; the narrow view at most one); 0 hides the log |
-| Limits: yellow from | 50 | The share (%) from which the session or all-models bar turns yellow |
-| Limits: red from | 80 | The share (%) from which it turns red; above the yellow one |
-| Advisor sound | off | A short sound at each advisor call: a chime on macOS, two beeps on Windows (through PowerShell), nothing on Linux |
+| Limits: yellow from | 60 | The share (%) from which the session or all-models bar turns yellow, and the HUD's lamp shows CAUTION |
+| Limits: red from | 90 | The share (%) from which it turns red, and the lamp shows CRITICAL; above the yellow one |
+| Sound | on | Every sound of the pane at once; each event has its own switch on the sounds page: agent done, agent failed, agent waiting, turn complete, red alert and power-up are on, advisor call and agent deployed are off. macOS plays them itself, Windows through PowerShell, Linux through `paplay` or `aplay` |
 | Line above the prompt | on | While the pane is closed, a line above the prompt sums up the agents, drawn as token-weather draws its own: `⠹ Opus 5.5  2 running  1 waiting · 4 done  ●●‖✓✗  ◆3 · ≈$1.84` |
 | Auto-update | on | Once a day, a copy installed from the marketplace checks GitHub for a newer version and installs it (see [Updates](#updates)) |
 

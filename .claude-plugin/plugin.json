@@ -11,7 +11,10 @@
   "icon": "./.claude-plugin/icon.png",
   "types": "./types/index.d.ts",
   "network": {
-    "hosts": ["raw.githubusercontent.com", "github.com"]
+    "hosts": [
+      "raw.githubusercontent.com",
+      "github.com"
+    ]
   },
   "userConfig": {
     "openOnStart": {
@@ -24,6 +27,12 @@
       "type": "boolean",
       "title": "Motion",
       "description": "The spinner while Claude works; a light running along the bars and a pulse down every line of the tree, idle too",
+      "default": true
+    },
+    "hud": {
+      "type": "boolean",
+      "title": "Forge HUD",
+      "description": "The sci-fi look: rails, LED bars, a neon palette and a navy plate on a dark theme; off: the classic look",
       "default": true
     },
     "columns": {
@@ -42,13 +51,13 @@
       "type": "number",
       "title": "Limits: yellow from",
       "description": "The share (%) of the session or all-models limit from which its bar turns yellow",
-      "default": 50
+      "default": 60
     },
     "limitAlertAt": {
       "type": "number",
       "title": "Limits: red from",
       "description": "The share (%) of the session or all-models limit from which its bar turns red; above the yellow one",
-      "default": 80
+      "default": 90
     },
     "bandLine": {
       "type": "boolean",
@@ -56,11 +65,59 @@
       "description": "While the pane is closed, a line above the prompt sums up the agents, drawn as token-weather draws its own",
       "default": true
     },
+    "sound": {
+      "type": "boolean",
+      "title": "Sound",
+      "description": "Every sound of the pane at once; each event has its own switch on the sounds page (o, then Sound events)",
+      "default": true
+    },
     "advisorSound": {
       "type": "boolean",
-      "title": "Advisor sound",
-      "description": "A short sound at each advisor call: a chime on macOS, two beeps on Windows (through PowerShell), nothing on Linux",
+      "title": "Sound: advisor call",
+      "description": "An uplink chirp at each advisor call (with Sound on)",
       "default": false
+    },
+    "soundSpawn": {
+      "type": "boolean",
+      "title": "Sound: agent deployed",
+      "description": "A rising bloop when a subagent starts (a workflow’s agents make none) (with Sound on)",
+      "default": false
+    },
+    "soundDone": {
+      "type": "boolean",
+      "title": "Sound: agent done",
+      "description": "Two rising chimes when an agent or a workflow run finishes well (with Sound on)",
+      "default": true
+    },
+    "soundFailed": {
+      "type": "boolean",
+      "title": "Sound: agent failed",
+      "description": "Falling tones when an agent or a workflow run fails (with Sound on)",
+      "default": true
+    },
+    "soundWaiting": {
+      "type": "boolean",
+      "title": "Sound: agent waiting",
+      "description": "A sonar ping when an agent starts waiting for you (with Sound on)",
+      "default": true
+    },
+    "soundTurn": {
+      "type": "boolean",
+      "title": "Sound: turn complete",
+      "description": "A bell arpeggio when the main session’s answer is done (with Sound on)",
+      "default": true
+    },
+    "soundAlert": {
+      "type": "boolean",
+      "title": "Sound: red alert",
+      "description": "A klaxon when the context reaches 90% or a limit its red mark (with Sound on)",
+      "default": true
+    },
+    "soundBoot": {
+      "type": "boolean",
+      "title": "Sound: power-up",
+      "description": "When the pane first opens in a session (with Sound on)",
+      "default": true
     },
     "autoUpdate": {
       "type": "boolean",

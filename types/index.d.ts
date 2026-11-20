@@ -229,7 +229,8 @@ export type TreeChoices = {
 }
 
 /** What the pane shows: the tree, the help (`h`), the options (`o`). */
-export type TreeView = 'tree' | 'help' | 'options'
+/** What the pane shows: the tree, the help, the options page, or the sounds page under it (plan 09). */
+export type TreeView = 'tree' | 'help' | 'options' | 'sounds'
 
 /** The languages the pane speaks: English, Hungarian and 21 more the user asked for. */
 export type Lang =

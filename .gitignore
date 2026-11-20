@@ -8,5 +8,7 @@ PLANS/
 /*.jpg
 /*.png
 
-# Personal Claude Code settings (permissions); the commands under .claude/ belong to the repository
-.claude/settings.local.json
+# Agent instructions and Claude Code's own folder (settings, commands): kept local only
+.claude/
+CLAUDE.md
+AGENTS.md

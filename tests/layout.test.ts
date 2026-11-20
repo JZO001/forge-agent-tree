@@ -3,7 +3,8 @@ import { describe, expect, test } from 'claude-code/testing'
 import { BAND_GAP, DEFAULT_SETTINGS, PICKED_COLOR, aliasOf, bandLine, fieldKey, frameRows, hasLiveCell, isButton, layout, modelChoiceLabel, rowWidth, runOpen } from '../hooks/layout'
 import { PULSE_COLOR, TIME_COLOR, TITLE_COLOR, TRUNK_COLOR, width } from '../hooks/format'
 import { LANGS, wordsFor } from '../hooks/words'
-import type { Row, Settings } from '../hooks/layout'
+import type { LayoutOptions, Row, Settings } from '../hooks/layout'
+import { EFFECT_MS, RADAR, effectsEnd } from '../hooks/hud'
 import { emptyTree } from '../hooks/model'
 import type { PickerId, TreeUi } from '../types'
 import { NOW, busyTree, workflowTree } from './fixture'
@@ -373,6 +374,10 @@ describe('rate limits', () => {
     const high = segs(s => (s.main.limits = [{ kind: 'five_hour', percent: 63 }, { kind: 'seven_day', percent: 91 }]))
     expect(high.find(x => x.text === ' 63%')).toMatchObject({ color: 'warning' })
     expect(high.find(x => x.text === ' 91%')).toMatchObject({ color: 'error' })
+    // under the marks (60% and 90% by default): still green, still yellow
+    const under = segs(s => (s.main.limits = [{ kind: 'five_hour', percent: 59 }, { kind: 'seven_day', percent: 89 }]))
+    expect(under.find(x => x.text === ' 59%')).toMatchObject({ color: 'success' })
+    expect(under.find(x => x.text === ' 89%')).toMatchObject({ color: 'warning' })
   })
 
   test('with little room the word for resets goes first, then the countdown: the day and the time stay longest', () => {
@@ -1358,11 +1363,11 @@ describe("the state signs and the names in color (the user's request, no gray)",
     s.agents = s.agents.map(a => (a.id === 'm4' ? { ...a, state: 'stopped' as const } : a.id === 'm5' ? { ...a, state: 'starting' as const } : a))
     const rows = rowsOf(s)
     const sign = (name: string, text: string) => segsOf(rowOf(rows, name)).find(x => x.text === text)
-    expect(sign('review:api', '✓')).toEqual({ text: '✓', color: 'success' })
-    expect(sign('review:ui', '■')).toEqual({ text: '■', color: 'warning' })
-    expect(sign('review:cli', '◌')).toEqual({ text: '◌', color: 'success' })
-    expect(sign('verify:db.ts', '✗')).toEqual({ text: '✗', color: 'error' })
-    expect(sign('verify:auth.ts', '⠹')).toEqual({ text: '⠹', color: 'success' })
+    expect(sign('review:api', '✓')).toMatchObject({ text: '✓', color: 'success' })
+    expect(sign('review:ui', '■')).toMatchObject({ text: '■', color: 'warning' })
+    expect(sign('review:cli', '◌')).toMatchObject({ text: '◌', color: 'success' })
+    expect(sign('verify:db.ts', '✗')).toMatchObject({ text: '✗', color: 'error' })
+    expect(sign('verify:auth.ts', '⠹')).toMatchObject({ text: '⠹', color: 'success' })
     // the legend says the same
     const help = layout(busyTree(), { ...UI, view: 'help' }, { cols: 56, now: NOW, frame: 0, animate: false }).flatMap(segsOf)
     expect(help.find(x => x.text === '✓')).toMatchObject({ color: 'success' })
@@ -1426,9 +1431,15 @@ describe('the options page (plan 06)', () => {
     expect(lines[4]).toBe('  open the pane when an interactive session starts')
     expect(lines.find(l => l.startsWith('Width'))).toMatch(/^Width +− 56 \+$/)
     expect(lines.find(l => l.startsWith('Log rows'))).toMatch(/^Log rows +− 5 \+$/)
-    expect(lines.find(l => l.startsWith('Limits: yellow from'))).toMatch(/− 50% \+$/)
-    expect(lines.find(l => l.startsWith('Limits: red from'))).toMatch(/− 80% \+$/)
-    expect(lines.find(l => l.startsWith('Advisor sound'))).toMatch(/^Advisor sound +off$/)
+    // the user's defaults of 2026-11-20: yellow from 60%, red from 90%
+    expect(lines.find(l => l.startsWith('Limits: yellow from'))).toMatch(/− 60% \+$/)
+    expect(lines.find(l => l.startsWith('Limits: red from'))).toMatch(/− 90% \+$/)
+    expect(lines.find(l => l.startsWith('Forge HUD'))).toMatch(/^Forge HUD +on$/)
+    // the sounds: one switch for them all here, each on the sounds page (plan 09)
+    // on by default, every event but the advisor's call and a new agent's (the user's defaults of 2026-11-20)
+    expect(lines.find(l => l.startsWith('Sound '))).toMatch(/^Sound +on$/)
+    expect(lines.find(l => l.startsWith('Sound events'))).toMatch(/^Sound events +6\/8 ▸$/)
+    expect(lines.some(l => l.startsWith('Advisor'))).toBe(false)
     expect(lines.find(l => l.startsWith('Auto-update'))).toMatch(/^Auto-update +on$/)
     expect(lines).toContain('  daily, from GitHub; marketplace installs only')
     // the language by its own name, not its code (the user's request)
@@ -1441,7 +1452,7 @@ describe('the options page (plan 06)', () => {
   test('a press sets a value as /config would: on and off switch, a number steps, held to its bounds', () => {
     const rows = page()
     const press = (label: string, text: string) => segsOf(rowOf(rows, label)).find(x => x.text === text)?.press
-    expect(press('Advisor sound', 'off')).toEqual({ kind: 'option', field: 'advisorSound', value: true })
+    expect(press('Sound ', 'on')).toEqual({ kind: 'option', field: 'sound', value: false })
     expect(press('Auto-update', 'on')).toEqual({ kind: 'option', field: 'autoUpdate', value: false })
     expect(press('Motion', 'on')).toEqual({ kind: 'option', field: 'animate', value: false })
     expect(press('Width', '−')).toEqual({ kind: 'option', field: 'columns', value: 52 })
@@ -1457,8 +1468,8 @@ describe('the options page (plan 06)', () => {
   })
 
   test('an option a policy locks shows its value with no button', () => {
-    const rows = page(OPTIONS, 56, undefined, { values: DEFAULT_SETTINGS, locked: ['advisorSound', 'columns'] })
-    expect(segsOf(rowOf(rows, 'Advisor sound')).some(x => x.press !== undefined)).toBe(false)
+    const rows = page(OPTIONS, 56, undefined, { values: DEFAULT_SETTINGS, locked: ['sound', 'columns'] })
+    expect(segsOf(rowOf(rows, 'Sound ')).some(x => x.press !== undefined)).toBe(false)
     expect(lineOf(rowOf(rows, 'Width')!)).toMatch(/^Width +56$/)
     expect(segsOf(rowOf(rows, 'Motion')).some(x => x.press !== undefined)).toBe(true)
   })
@@ -1468,7 +1479,7 @@ describe('the options page (plan 06)', () => {
     const short = page(OPTIONS, 56, 16).map(lineOf)
     expect(short.length <= 16).toBe(true)
     expect(short.some(l => l.startsWith('  open the pane'))).toBe(false)
-    expect(short.some(l => l.startsWith('Advisor sound'))).toBe(true)
+    expect(short.some(l => l.startsWith('Sound events'))).toBe(true)
     expect(short.at(-1)).toBe('o: back  h: help')
   })
 
@@ -1502,5 +1513,411 @@ describe('the options page (plan 06)', () => {
     expect(help.at(-1)).toBe('o: options  h: back')
     const hu = layout(busyTree(), { ...HU, view: 'help' }, { cols: 78, now: NOW, frame: 0, animate: false }).map(lineOf)
     expect(hu).toContain('/tree close bezárja a panelt; /tree újra megnyitja')
+  })
+})
+
+// ── the Forge HUD (plan 08) ─────────────────────────────────────────────
+
+describe('the Forge HUD (plan 08)', () => {
+  const hud = (ui: TreeUi = UI, cols = 56, rows?: number, s = busyTree(), theme: 'dark' | 'light' | 'ansi' = 'dark') =>
+    layout(s, ui, { cols, rows, now: NOW, frame: 0, animate: true, look: 'hud', theme })
+
+  for (const cols of [36, 44, 56, 71, 72, 120]) {
+    for (const rows of [undefined, 24, 16, 10]) {
+      test(`${cols} columns, ${rows ?? 'all'} rows: every row fits in every language, with every panel and the runs`, () => {
+        const cases = [...VARIANTS.map(ui => ({ ui, s: busyTree })), ...WF_VARIANTS.map(ui => ({ ui, s: workflowTree }))]
+        for (const { ui, s } of cases) {
+          const which = `${ui.lang ?? 'en'}${ui.picker ? ` + ${ui.picker}` : ''}${ui.compose ? ' + message' : ''}${s === workflowTree ? ' + runs' : ''}`
+          const drawn = layout(s(), ui, { cols, rows, now: NOW, frame: 3, animate: true, look: 'hud', theme: 'dark' })
+          for (const row of drawn) {
+            expect(rowWidth(row) <= cols, `${which}: ${rowWidth(row)} > ${cols}: ${lineOf(row)}`).toBe(true)
+            if (row.kind === 'press') expect(rowWidth(row), `${which}: a pressable row fills the width: ${lineOf(row)}`).toBe(cols)
+          }
+          if (rows !== undefined) expect(drawn.length <= rows, `${which}: ${drawn.length} rows > ${rows}`).toBe(true)
+          if (ui.picker) expect(drawn.some(r => lineOf(r).startsWith('┏━━ ')), `${which}: the panel shows in brackets`).toBe(true)
+          if (ui.compose) expect(drawn.some(r => r.kind === 'input'), `${which}: the field shows`).toBe(true)
+        }
+      })
+    }
+  }
+
+  test('the pages fit too: help, options, sounds, the empty pane, in every language and every theme', () => {
+    for (const cols of [36, 56, 78]) {
+      for (const ui of ALL_LANGS) {
+        for (const theme of ['dark', 'light'] as const) {
+          for (const view of ['help', 'options', 'sounds'] as const) {
+            for (const row of hud({ ...ui, view }, cols, undefined, busyTree(), theme)) expect(rowWidth(row) <= cols, `${ui.lang} ${view} ${cols}: ${lineOf(row)}`).toBe(true)
+          }
+          for (const row of hud(ui, cols, undefined, emptyTree(NOW), theme)) expect(rowWidth(row) <= cols, lineOf(row)).toBe(true)
+        }
+      }
+    }
+  })
+
+  test('the title is a bar: the emblem, the name in capitals, a rule, the lamp and its word, the language sign', () => {
+    const lines = hud().map(lineOf)
+    expect(lines[0]).toMatch(/^◢◤ AGENT TREE \/\/ FORGE ━+ ◉ NOMINAL ▾en$/)
+    expect(width(lines[0]!)).toBe(56)
+    // narrow: the lamp's word as a mark, so the color is never the only sign
+    expect(hud(UI, 36).map(lineOf)[0]).toMatch(/^◢◤ AGENT TREE \/\/ FORGE ━+ ◉ OK ▾en$/)
+    // a limit at its yellow mark: caution; the context at 90%: critical
+    const warm = busyTree()
+    warm.main.limits = [{ kind: 'five_hour', percent: 60 }]
+    expect(hud(UI, 56, undefined, warm).map(lineOf)[0]).toMatch(/◉ CAUTION ▾en$/)
+    const hot = busyTree()
+    hot.main.contextPercent = 92
+    expect(hud(UI, 56, undefined, hot).map(lineOf)[0]).toMatch(/◉ CRITICAL ▾en$/)
+    expect(hud(UI, 36, undefined, hot).map(lineOf)[0]).toMatch(/◉ !! ▾en$/)
+    // the language sign still opens its panel
+    const sign = hud()[0]!
+    expect(sign.kind !== 'keys' && sign.segs.some(x => x.press?.kind === 'picker' && x.text === '▾')).toBe(true)
+  })
+
+  test('rails stand where the classic look has empty rows and separators, each named for its group', () => {
+    const lines = hud().map(lineOf)
+    expect(lines[1]).toMatch(/^┌ CORE ┄+┐$/)
+    expect(lines.some(l => /^┌ LIMITS ┄+┐$/.test(l))).toBe(true)
+    expect(lines.some(l => /^┌ CREW ┄+┐$/.test(l))).toBe(true)
+    // the tree's rail tells the agents at work, the log's the time, the last closes the frame
+    expect(lines.some(l => /^┌┄+ 2 running · 1 waiting ┐$/.test(l))).toBe(true)
+    expect(lines.some(l => /^┌ LOG ┄+ \d\d:\d\d:\d\d ┐$/.test(l))).toBe(true)
+    expect(lines.at(-2)).toMatch(/^└┄+┘$/)
+    // as many rows as the classic look
+    expect(lines.length).toBe(draw(56).length)
+  })
+
+  test('the log’s clock ticks its seconds while the pane moves, live so an idle pane keeps redrawing; still, it shows minutes', () => {
+    const moving = hud().find(r => lineOf(r).startsWith('┌ LOG'))!
+    expect(moving.kind !== 'keys' && moving.segs.some(x => /^\d\d:\d\d:\d\d$/.test(x.text) && x.live === true)).toBe(true)
+    expect(hasLiveCell(layout(busyTree(), { ...UI, showLog: true }, { cols: 56, now: NOW, frame: 0, animate: true, look: 'hud' }))).toBe(true)
+    const still = layout(busyTree(), UI, { cols: 56, now: NOW, frame: 0, animate: false, look: 'hud' }).find(r => lineOf(r).startsWith('┌ LOG'))!
+    expect(lineOf(still)).toMatch(/ \d\d:\d\d ┐$/)
+    expect(still.kind !== 'keys' && still.segs.some(x => x.live === true)).toBe(false)
+  })
+
+  test('labels in capitals, in the pane’s language: the Turkish dotted İ, Greek without accents', () => {
+    const lines = hud().map(lineOf)
+    for (const label of ['CTX', 'SESSION', 'ALL', 'TEAM', 'AGENTS']) expect(lines.some(l => l.startsWith(label)), label).toBe(true)
+    expect(hud({ ...UI, lang: 'tr' }).map(lineOf)[1]).toMatch(/^┌ ÇEKİRDEK ┄+┐$/)
+    expect(hud({ ...UI, lang: 'el' }).map(lineOf)[1]).toMatch(/^┌ ΠΥΡΗΝΑΣ ┄+┐$/)
+  })
+
+  test('bars as LED segments: lit ones in the bar’s color, unlit ones in its dark tint (a dark theme) or thin (a light one)', () => {
+    const ctx = hud().find(r => lineOf(r).startsWith('CTX'))!
+    expect(lineOf(ctx)).toMatch(/^CTX +☁ +▌{10} 47%/)
+    const segs = ctx.kind === 'keys' ? [] : ctx.segs
+    expect(segs.some(x => x.text.includes('▌') && x.color === '#2EE6F2')).toBe(true)
+    // the light running along it: one segment, a shade lighter, live
+    expect(segs.some(x => x.text === '▌' && x.live === true)).toBe(true)
+    const light = hud(UI, 56, undefined, busyTree(), 'light').find(r => lineOf(r).startsWith('CTX'))!
+    expect(lineOf(light)).toMatch(/^CTX +☁ +▌{5}▏{5} 47%/)
+    // a light or an ANSI theme: no color of the HUD's own anywhere
+    for (const theme of ['light', 'ansi'] as const) {
+      for (const row of hud(UI, 56, undefined, busyTree(), theme)) {
+        if (row.kind === 'keys') continue
+        for (const x of row.segs) expect(/^#/.test(x.color ?? '') || /^#/.test(x.bg ?? ''), `${theme}: ${x.text} ${x.color} ${x.bg}`).toBe(false)
+      }
+    }
+  })
+
+  test('the tree: the core ⬢ at the root, the main trunk heavy, the inner lines light; every row as wide as before', () => {
+    const lines = hud({ ...UI, openRuns: ['wf_review'] }, 56, undefined, workflowTree()).map(lineOf)
+    const main = lines.findIndex(l => l.startsWith('⬢ main “'))
+    expect(main > 0).toBe(true)
+    expect(lines[main + 1]).toMatch(/^┃  /)
+    expect(lines.some(l => l.startsWith('┣━ '))).toBe(true)
+    expect(lines.some(l => l.startsWith('┗━ '))).toBe(true)
+    // a run's own line stays light, under the heavy trunk
+    expect(lines.some(l => l.startsWith('┃  ├─ ') || l.startsWith('┃  └─ '))).toBe(true)
+    for (const l of lines) expect(width(l) <= 56, l).toBe(true)
+  })
+
+  test('the navy plate under the header on a dark theme: every header row the pane’s width, its every part on the plate', () => {
+    const rows = hud()
+    const tree = rows.findIndex(r => lineOf(r).startsWith('┌┄'))
+    expect(tree > 0).toBe(true)
+    for (const row of rows.slice(0, tree)) {
+      if (row.kind === 'keys') continue
+      expect(rowWidth(row), lineOf(row)).toBe(56)
+      for (const x of row.segs) expect(x.bg, `${lineOf(row)}: ${x.text}`).toBe('#0B1828')
+    }
+    for (const row of rows.slice(tree)) if (row.kind !== 'keys') for (const x of row.segs) expect(x.bg).toBeUndefined()
+    // no plate on a light theme
+    for (const row of hud(UI, 56, undefined, busyTree(), 'light')) if (row.kind !== 'keys') for (const x of row.segs) expect(x.bg).toBeUndefined()
+  })
+
+  test('a panel in corner brackets, the chosen value lit as a key, the message field under it', () => {
+    const lines = hud({ ...UI, picker: 'model' }).map(lineOf)
+    const top = lines.findIndex(l => l.startsWith('┏━━ SESSION MODEL'))
+    expect(top > 0).toBe(true)
+    expect(lines[top]).toMatch(/━━┓$/)
+    expect(lines.slice(top).find(l => l.startsWith('┗━━'))).toMatch(/━━┛$/)
+    const rows = hud({ ...UI, picker: 'model' })
+    const picked = rows.flatMap(r => (r.kind === 'keys' ? [] : r.segs)).find(x => x.text === 'Opus' && x.bg !== undefined)
+    expect(picked?.bg).toBe('#2EE6F2')
+    expect(picked?.press).toEqual({ kind: 'choose', id: 'model', value: 'opus' })
+    const compose = hud({ ...UI, compose: 'a1' }, 56, 40).map(lineOf)
+    expect(compose.some(l => l.startsWith('┏━━ ✎ Message to Find auth handlers'))).toBe(true)
+    expect(compose.some(l => l.startsWith('┗━━ TYPE YOUR MESSAGE BELOW'))).toBe(true)
+  })
+
+  test('the classic look stays as it was where no look is given', () => {
+    expect(draw(56)[0]).toBe(`Agent Tree // Forge${' '.repeat(34)}▾en`)
+    expect(layout(busyTree(), UI, { cols: 56, now: NOW, frame: 0, animate: true, look: 'classic' }).map(lineOf)).toEqual(
+      layout(busyTree(), UI, { cols: 56, now: NOW, frame: 0, animate: true }).map(lineOf),
+    )
+  })
+})
+
+// ── the sounds page (plan 09) ───────────────────────────────────────────
+
+describe('the sounds page (plan 09)', () => {
+  const SOUNDS: TreeUi = { ...UI, view: 'sounds' }
+  const page = (ui: TreeUi = SOUNDS, cols = 56, rows?: number) => layout(busyTree(), ui, { cols, rows, now: NOW, frame: 0, animate: false })
+
+  test('the switch for them all first, then each event: its name, ► to hear it, its switch, a line about it', () => {
+    const lines = page().map(lineOf)
+    expect(lines[1]).toBe('Sounds')
+    expect(lines[3]).toMatch(/^Sound +on$/)
+    expect(lines.find(l => l.startsWith('Advisor call'))).toMatch(/^Advisor call +► +off$/)
+    expect(lines.find(l => l.startsWith('Agent deployed'))).toMatch(/^Agent deployed +► +off$/)
+    expect(lines.find(l => l.startsWith('Agent done'))).toMatch(/^Agent done +► +on$/)
+    expect(lines.find(l => l.startsWith('Red alert'))).toMatch(/^Red alert +► +on$/)
+    expect(lines).toContain('  klaxon at 90% context or a red limit')
+    expect(lines.at(-1)).toBe('o: back  h: help')
+    const rows = page()
+    const play = rows.flatMap(r => (r.kind === 'keys' ? [] : r.segs)).find(x => x.key === 'test:turn')
+    expect(play?.press).toEqual({ kind: 'testSound', event: 'turn' })
+    const turn = rows.find(r => lineOf(r).startsWith('Turn complete'))!
+    expect(turn.kind !== 'keys' && turn.segs.find(x => x.text === 'on')?.press).toEqual({ kind: 'option', field: 'soundTurn', value: false })
+  })
+
+  test('it fits every width in every language; a short pane drops the lines about the sounds, then the note', () => {
+    for (const cols of [36, 44, 56, 72, 120]) {
+      for (const l of LANGS) {
+        for (const rows of [undefined, 24, 16]) {
+          const drawn = page({ ...SOUNDS, lang: l.code }, cols, rows)
+          for (const row of drawn) expect(rowWidth(row) <= cols, `${l.code} ${cols}: ${lineOf(row)}`).toBe(true)
+          if (rows !== undefined) expect(drawn.length <= rows, `${l.code} ${cols}×${rows}`).toBe(true)
+        }
+      }
+    }
+    const short = page(SOUNDS, 56, 16).map(lineOf)
+    expect(short.some(l => l.startsWith('  uplink'))).toBe(false)
+    expect(short.some(l => l.startsWith('Power-up'))).toBe(true)
+  })
+})
+
+// ── the Forge HUD in motion (plan 08, F2 and F3) ────────────────────────
+
+describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
+  const at = (o: Partial<LayoutOptions> = {}, s = busyTree(), ui: TreeUi = UI) =>
+    layout(s, ui, { cols: 56, now: NOW, frame: 0, animate: true, look: 'hud', theme: 'dark', ...o })
+  const cellsOf = (row: Row | undefined) => (row && row.kind !== 'keys' ? row.segs.flatMap(x => Array.from(x.text).map(ch => ({ ...x, text: ch }))) : [])
+  const rowOf = (rows: Row[], start: string) => rows.find(r => lineOf(r).startsWith(start))
+  /** Fresh events: an agent just started, one just done, one just failed, a log row just written, an advisor call just made. */
+  const fresh = () => {
+    const s = busyTree()
+    s.agents = s.agents.map(a =>
+      a.description === 'Scan API routes'
+        ? { ...a, startedAt: NOW - 100 }
+        : a.state === 'done'
+          ? { ...a, endedAt: NOW - 100 }
+          : a.state === 'failed'
+            ? { ...a, endedAt: NOW - 100 }
+            : a,
+    )
+    s.log = [{ ...s.log[0]!, at: NOW - 300 }, ...s.log.slice(1)]
+    const calls = s.advisor.calls
+    s.advisor = { ...s.advisor, calls: [...calls.slice(0, -1), { ...calls[calls.length - 1]!, at: NOW - 100 }] }
+    return s
+  }
+
+  test('a comet runs down the trunk: a white head, a two-cell tail; it leaves the core lit', () => {
+    const main = (rows: Row[]) => rows.findIndex(r => lineOf(r).startsWith('⬢ main'))
+    const rows = at({ frame: 3 })
+    const m = main(rows)
+    const col0 = rows.slice(m, m + 6).map(r => cellsOf(r)[0])
+    // frame 3: the head three rows down from the core, its tail above it
+    expect(col0[3]).toMatchObject({ color: '#FFFFFF', bold: true })
+    expect(col0[2]?.color).toBe('#9FF6FF')
+    expect(col0[1]?.color).toBe('#5FE9F7')
+    // frame 0: the core lights as it sends one
+    const sent = at({ frame: 0 })
+    expect(cellsOf(sent[main(sent)])[0]).toMatchObject({ text: '⬢', color: '#FFFFFF' })
+    // it turns onto a branch it passes: the head on a ┣ lights its ━
+    for (let f = 0; f < 20; f++) {
+      const r = at({ frame: f })
+      const row = r.find(x => cellsOf(x)[0]?.text === '┣' && cellsOf(x)[0]?.color === '#FFFFFF')
+      if (row) {
+        expect(cellsOf(row)[1]).toMatchObject({ text: '━', color: '#FFFFFF' })
+        return
+      }
+    }
+    throw new Error('the head never passed a branch')
+  })
+
+  test('the title: a light sweeps its rule; the lamp breathes, and blinks when critical; the core beats while main works', () => {
+    const rule = (f: number) => cellsOf(at({ frame: f })[0]).filter(c => c.text === '━').map(c => c.color)
+    expect(rule(10)).not.toEqual(rule(30))
+    expect(rule(10).some(c => c !== '#1F5E6B')).toBe(true)
+    const hot = busyTree()
+    hot.main.contextPercent = 93
+    const lamp = (f: number) => cellsOf(at({ frame: f }, hot)[0]).find(c => c.text === '◉')?.color
+    expect(lamp(0)).not.toBe(lamp(4))
+    const core = (f: number) => cellsOf(rowOf(at({ frame: f }), '⬢ main')).find(c => c.text === '⬢')?.color
+    // frame 4 is half a beat (frame 0 is the comet's flash at the core)
+    expect(core(4)).not.toBe(core(8))
+  })
+
+  test('events: the newest log row types in, the advisor’s ◆ flashes, a new name types in, a finish flashes, a failure glitches', () => {
+    const rows = at({ frame: 5 }, fresh())
+    const log = rows.find(r => r.kind === 'text' && r.role === 'log')!
+    expect(lineOf(log)).toContain('▌')
+    expect(lineOf(log)).not.toContain('called by main')
+    expect(cellsOf(rows.find(r => lineOf(r).startsWith('◆')))[0]).toMatchObject({ text: '◆', color: '#FFFFFF' })
+    const scan = fresh().agents.find(a => a.description === 'Scan API routes')!.id
+    const born = rows.find(r => r.kind !== 'keys' && r.kind !== 'input' && r.agent === scan)!
+    expect(lineOf(born)).not.toContain('Scan API routes')
+    expect(lineOf(born)).toContain('▌')
+    const done = rows.find(r => lineOf(r).includes('Run test suite'))!
+    expect(cellsOf(done).find(c => c.text === '✓')?.color).toBe('#FFFFFF')
+    const failed = rows.find(r => r.kind !== 'keys' && r.kind !== 'input' && r.agent !== undefined && lineOf(r).includes('✗'))!
+    expect(lineOf(failed)).toMatch(/[▓▒░█▚▞▙▟▛▜]/)
+    expect(rowWidth(failed)).toBe(56)
+    // a second later all of it stands still again
+    const later = at({ frame: 5, now: NOW + 2000 }, fresh())
+    expect(lineOf(later.find(r => r.kind === 'text' && r.role === 'log')!)).toContain('called by main')
+    expect(later.some(r => lineOf(r).includes('Scan API routes'))).toBe(true)
+    expect(later.some(r => /[▓▒░█▚▞▙▟▛▜]/.test(lineOf(r)))).toBe(false)
+  })
+
+  test('a waiting agent’s ‖ blinks; a red bar pulses', () => {
+    const wait = (f: number) => cellsOf(at({ frame: f }).find(r => lineOf(r).includes('Migrate session store'))).find(c => c.text === '‖')?.color
+    expect(wait(0)).not.toBe(wait(4))
+    const hot = busyTree()
+    hot.main.contextPercent = 93
+    const bar = (f: number) => cellsOf(at({ frame: f }, hot).find(r => lineOf(r).startsWith('CTX'))).filter(c => c.text === '▌' && !c.live).map(c => c.color)
+    // the lit segments (the running light aside) brighten and dim
+    const lit = (f: number) => cellsOf(at({ frame: f }, hot).find(r => lineOf(r).startsWith('CTX'))).find(c => c.text === '▌')?.color
+    expect(lit(0)).not.toBe(lit(8))
+    expect(bar(0).length).toBeGreaterThan(0)
+  })
+
+  test('a panel unfolds a row at a time as it opens', () => {
+    const ui: TreeUi = { ...UI, picker: 'model' }
+    const opening = at({ openedAt: NOW - 100 }, busyTree(), ui).map(lineOf)
+    expect(opening.some(l => l.startsWith('┏━━ SESSION MODEL'))).toBe(true)
+    expect(opening.some(l => l.includes('Opus Plan'))).toBe(false)
+    const open = at({ openedAt: NOW - 1000 }, busyTree(), ui).map(lineOf)
+    expect(open.some(l => l.includes('Opus Plan'))).toBe(true)
+  })
+
+  test('a scan line lights the frame’s lines, never the text', () => {
+    const rail = (f: number) => cellsOf(at({ frame: f })[1]).find(c => c.text === '┄')?.color
+    expect(rail(3)).not.toBe(rail(20))
+    const label = (f: number) => cellsOf(at({ frame: f })[1]).find(c => c.text === 'C')?.color
+    expect(label(3)).toBe(label(20))
+  })
+
+  test('the radar sweeps the empty tree where there is room; a narrow or short pane keeps the words alone', () => {
+    const braille = (rows: Row[]) => rows.some(r => /[⠁-⣿]/.test(lineOf(r).replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '')))
+    const empty = emptyTree(NOW)
+    const rows = at({ frame: 4 }, empty)
+    expect(braille(rows)).toBe(true)
+    expect(rows.some(r => lineOf(r).includes('◌ No subagents yet.'))).toBe(true)
+    expect(at({ frame: 5 }, empty).map(lineOf)).not.toEqual(rows.map(lineOf))
+    expect(braille(at({ cols: 36 }, empty))).toBe(false)
+    expect(braille(layout(empty, UI, { cols: 56, rows: 14, now: NOW, frame: 4, animate: true, look: 'hud' }))).toBe(false)
+    // the classic look: the words alone, as ever
+    expect(braille(layout(empty, UI, { cols: 56, now: NOW, frame: 4, animate: true }))).toBe(false)
+  })
+
+  test('the radar never pushes out a rail or a log row: it stands only where everything else still fits', () => {
+    const s = { ...busyTree(), agents: [], runs: [] }
+    const rails = (r: Row[]) => r.filter(x => x.kind === 'text' && x.role === 'rail' && x.rail?.label !== undefined && x.rail.label !== 'log').length
+    const logs = (r: Row[]) => r.filter(x => x.kind === 'text' && x.role === 'log').length
+    const radar = (r: Row[]) => r.some(x => x.kind === 'text' && x.role === 'radar')
+    for (const rows of [16, 18, 20, 22, 24, 26, 28, 30, 34, 40]) {
+      const classic = layout(s, UI, { cols: 56, rows, now: NOW, frame: 0, animate: true })
+      const hud = layout(s, UI, { cols: 56, rows, now: NOW, frame: 0, animate: true, look: 'hud', theme: 'dark' })
+      expect(rails(hud), `${rows} rows: the rails`).toBe(rails(classic))
+      expect(logs(hud), `${rows} rows: the log`).toBe(logs(classic))
+      expect(hud.length <= rows, `${rows} rows`).toBe(true)
+      if (radar(hud)) expect(classic.length + RADAR.h - 2 <= rows, `${rows} rows: room for the radar`).toBe(true)
+    }
+    expect(radar(layout(s, UI, { cols: 56, rows: 40, now: NOW, frame: 0, animate: true, look: 'hud' }))).toBe(true)
+    expect(radar(layout(s, UI, { cols: 56, rows: 20, now: NOW, frame: 0, animate: true, look: 'hud' }))).toBe(false)
+  })
+
+  test('a workflow run’s squad bar: a cell an agent before its description, in its state’s color', () => {
+    const rows = at({ frame: 3 }, workflowTree())
+    const about = rows.find(r => r.kind === 'text' && r.role === 'about')!
+    expect(lineOf(about)).toMatch(/^┃  │ ▌{6} Review changed files/)
+    const colors = cellsOf(about).filter(c => c.text === '▌').map(c => c.color)
+    expect(colors.slice(0, 4)).toEqual(['#3DDC84', '#3DDC84', '#3DDC84', '#3DDC84'])
+    expect(colors[5]).toBe('#FF4D6D')
+  })
+
+  test('the boot sequence: the title types in, the systems report OK, a bar fills, the pane draws itself in', () => {
+    const lines = (since: number) => at({ bootAt: NOW - since, frame: 2 }).map(lineOf)
+    const early = lines(900)
+    expect(early[0]).toMatch(/^◢◤ AGENT TREE \/\/ FORGE/)
+    expect(early.some(l => /^▸ CORE +Opus 5\.5 · high ·+ OK$/.test(l))).toBe(true)
+    expect(early.some(l => /^▸ CTX +47% ·+ OK$/.test(l))).toBe(true)
+    expect(early.some(l => l.startsWith('┌ CORE'))).toBe(false)
+    const bar = lines(1500)
+    expect(bar.some(l => /^▌+$/.test(l.trim()))).toBe(true)
+    const drawing = lines(2000)
+    expect(drawing.some(l => l.startsWith('┌ CORE'))).toBe(true)
+    expect(drawing.at(-1)!.trim()).toBe('')
+    const done = lines(3000)
+    expect(done).toEqual(at({ frame: 2 }).map(lineOf))
+    // as many rows as the pane; the boot's own rows the pane's width, none wider
+    for (const since of [100, 900, 1500, 2000]) {
+      const rows = at({ bootAt: NOW - since })
+      expect(rows.length).toBe(at().length)
+      for (const r of rows) expect(since < 1700 ? rowWidth(r) === 56 : rowWidth(r) <= 56, `${since}: ${lineOf(r)}`).toBe(true)
+    }
+    // no motion, no boot
+    expect(layout(busyTree(), UI, { cols: 56, now: NOW, frame: 0, animate: false, look: 'hud', bootAt: NOW - 100 }).map(lineOf)[1]).toMatch(/^┌ CORE/)
+  })
+
+  test('with motion off nothing moves: no live cell, no comet, no effect', () => {
+    const rows = layout(fresh(), { ...UI, picker: 'model' }, { cols: 56, now: NOW, frame: 3, animate: false, look: 'hud', theme: 'dark', openedAt: NOW - 50 })
+    expect(hasLiveCell(rows)).toBe(false)
+    expect(rows.some(r => lineOf(r).includes('▌') && r.kind === 'text' && r.role === 'log')).toBe(false)
+    expect(rows.some(r => cellsOf(r).some(c => c.color === '#FFFFFF'))).toBe(false)
+    expect(rows.map(lineOf).some(l => l.includes('Opus Plan'))).toBe(true)
+  })
+
+  test('the ticker’s fast pace lasts as long as the newest effect', () => {
+    const s = fresh()
+    expect(effectsEnd(s)).toBe(NOW - 100 + EFFECT_MS.spawn)
+    expect(effectsEnd(emptyTree(NOW))).toBe(0)
+  })
+
+  test('every row fits in motion: every language, frame and fresh event, the panels opening, the boot', () => {
+    for (const cols of [36, 56, 120]) {
+      for (const ui of ALL_LANGS) {
+        for (const frame of [0, 7, 21]) {
+          for (const [s, u, o] of [
+            [fresh(), ui, {}],
+            [busyTree(), { ...ui, picker: 'lang' as const }, { openedAt: NOW - 100 }],
+            [busyTree(), { ...ui, compose: 'a1' }, { openedAt: NOW - 100, rows: 40 }],
+            [workflowTree(), { ...ui, openRuns: ['wf_review'] }, {}],
+            [emptyTree(NOW), ui, {}],
+            [busyTree(), ui, { bootAt: NOW - 700 }],
+            [busyTree(), ui, { bootAt: NOW - 2000 }],
+          ] as Array<[ReturnType<typeof busyTree>, TreeUi, Partial<LayoutOptions>]>) {
+            const rows = layout(s, u, { cols, now: NOW, frame, animate: true, look: 'hud', theme: frame % 2 ? 'dark' : 'light', ...o })
+            for (const r of rows) {
+              expect(rowWidth(r) <= cols, `${ui.lang} ${cols} f${frame}: ${lineOf(r)}`).toBe(true)
+              if (r.kind === 'press') expect(rowWidth(r), `${ui.lang} ${cols} f${frame}: ${lineOf(r)}`).toBe(cols)
+            }
+          }
+        }
+      }
+    }
   })
 })

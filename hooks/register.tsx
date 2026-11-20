@@ -11,6 +11,9 @@
 // $.config.set, as if set in /config. Otherwise every hook passes its event on
 // unchanged, and a fault in the mod passes it on unchanged too (.catch).
 //
+// Its sounds (sounds.ts, plan 09) play only with the Sound option on: macOS
+// through $.audio.play, Windows through PowerShell, Linux through paplay or aplay.
+//
 // The one thing it does on its own is its update (update.ts, plan 07): with
 // the Auto-update option on, once a day at an interactive start, a copy
 // installed from a marketplace reads its version on GitHub and, when it is
@@ -21,8 +24,11 @@ import type { AgentInfo, EngineInterface, Register, TextProps, Timer } from 'cla
 import type { Lang, TreeLimit, TreeState, TreeUi } from '../types'
 import { EFFORT_LEVELS, LIMIT_THRESHOLDS, TITLE_TEXT, effortLevel, modelEffort } from './format'
 import type { LimitThresholds } from './format'
-import { ADVISOR_OFFER, BAND_GAP, OPTION_ORDER, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen } from './layout'
-import type { Press, Row, Seg, Settings } from './layout'
+import { ADVISOR_OFFER, BAND_GAP, DEFAULT_SETTINGS, OPTION_FIELDS, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen } from './layout'
+import type { Press, Row, Seg, Settings, ThemeKind } from './layout'
+import { SOUND_BEEPS, SOUND_OPTION, heardOf, pickSound, soundEvents, soundFile } from './sounds'
+import { BOOT_MS, EFFECT_MS, effectsEnd } from './hud'
+import type { Heard, SoundEvent } from './sounds'
 import {
   anyActive,
   compacted,
@@ -213,6 +219,7 @@ async function tick($: EngineInterface): Promise<void> {
   ticks += 1
   const busy = anyActive(mem)
   const watching = watchSwapUntil > 0
+  // A running effect of the HUD (a boot, an unfolding panel, an event's flash) draws live cells, so it keeps this going too.
   const idleShimmer = animate && shimmering
   if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && ticks % IDLE_TICKS !== 0) return
   ticking = true
@@ -232,6 +239,7 @@ async function tick($: EngineInterface): Promise<void> {
     if (due && now - lastSettings >= SETTINGS_EVERY_MS) {
       lastSettings = now
       await readOffer($)
+      await readTheme($)
       const advisor = await advisorSetting($)
       if (mem) {
         const next = advisorSet(mem, advisor)
@@ -243,10 +251,12 @@ async function tick($: EngineInterface): Promise<void> {
     }
     // Working, the spinner turns; idle, a countdown or an age still moves, once a minute.
     const clockText = mem !== undefined && (mem.advisor.calls.length > 0 || (mem.main.limits ?? []).some(l => l.resetsAt))
+    // While an event's effect runs (the HUD's motion), every frame, so it does not wait for the idle pace.
+    const effects = mem !== undefined && current.hud !== false ? Math.max(effectsEnd(mem), (bootAt ?? 0) + BOOT_MS.reveal, (panelAt ?? 0) + EFFECT_MS.unfold) : 0
     const redraw =
       mem !== undefined && anyActive(mem)
         ? animate || ticks % SLOW_TICKS === 0
-        : (idleShimmer && ticks % IDLE_SHIMMER_TICKS === 0) || (due && clockText && now - lastClockRedraw >= CLOCK_REDRAW_MS)
+        : (animate && now < effects) || (idleShimmer && ticks % IDLE_SHIMMER_TICKS === 0) || (due && clockText && now - lastClockRedraw >= CLOCK_REDRAW_MS)
     if (redraw) {
       lastClockRedraw = now
       frame = (frame + 1) % 1000
@@ -254,6 +264,7 @@ async function tick($: EngineInterface): Promise<void> {
     }
     await rememberLimits($)
     await flush($, now)
+    listen($, now)
   } finally {
     ticking = false
   }
@@ -290,6 +301,8 @@ async function adopt($: EngineInterface, now: number): Promise<void> {
     },
   }
   mem = listed(s, list.map(fromInfo), now)
+  // What the new session already holds sounds nothing.
+  heard = undefined
   watchSwapUntil = 0
   dirty = true
   await readContext($, now).catch(() => undefined)
@@ -457,45 +470,110 @@ async function registerCommand($: EngineInterface): Promise<string | undefined> 
   return second
 }
 
-type Options = {
-  openOnStart?: unknown
-  animate?: unknown
-  columns?: unknown
-  logRows?: unknown
-  limitWarnAt?: unknown
-  limitAlertAt?: unknown
-  bandLine?: unknown
-  advisorSound?: unknown
-  autoUpdate?: unknown
-}
+/** The options as `register` gets them, defaults filled in by the engine. */
+type Options = { [K in OptionField]?: unknown }
 
-/** The chime macOS plays at an advisor call: a file of the plugin's own. */
-const ADVISOR_CHIME = 'sounds/advisor.wav'
-/** Windows plays two short beeps instead: its terminal has no player for a file. */
-const WINDOWS_BEEP = '[console]::beep(988,110); [console]::beep(1319,170)'
-/** At most one sound this often, however many calls come together. */
-const SOUND_GAP_MS = 2000
+/** The options of this load: the ticker reads them (a change of options reloads the plugin). */
+let current: Options = {}
 
 /** The system the session runs on, as `uname -s` names it (`Darwin`, `Windows_NT`, `Linux`). */
 let sysname: string | undefined
-let lastSound = 0
+/** The plugin's folder, where its sounds are (`CLAUDE_PLUGIN_ROOT`); null where it could not be read. */
+let pluginRoot: string | null | undefined
+/** When each event last sounded, and any sound (`any`). */
+const lastSounds: Record<string, number> = {}
+/** What the sounds last heard of the session, to tell what changed (sounds.ts). */
+let heard: Heard | undefined
+/** The power-up sounds once a process, at the pane's first opening. */
+let poweredUp = false
+/** When the HUD's boot sequence started (plan 08, F3): the pane's first opening in the process, with motion on. */
+let bootAt: number | undefined
+/** When a panel last opened: the HUD unfolds it (F2). */
+let panelAt: number | undefined
+
+/** Whether an event sounds: the Sound option on (off by default), and the event's own (on by default). */
+function soundOn(options: Options, event: SoundEvent): boolean {
+  return flagOf(options, 'sound') && flagOf(options, SOUND_OPTION[event])
+}
+
+/** A switch as set, else its default (the engine fills them in; the defaults stand where it did not). */
+function flagOf(options: Options, field: OptionField): boolean {
+  const v = options[field]
+  return typeof v === 'boolean' ? v : DEFAULT_SETTINGS[field] === true
+}
+
+/** The plugin's own folder, read once. */
+async function rootOf($: EngineInterface): Promise<string | null> {
+  if (pluginRoot === undefined) pluginRoot = (await $.process.hookEnv().catch(() => ({}) as Record<string, string>)).CLAUDE_PLUGIN_ROOT ?? null
+  return pluginRoot
+}
 
 /**
- * A short sound at an advisor call, when the `advisorSound` option is on (off
- * by default). macOS plays the plugin's chime ($.audio.play); a Windows
- * terminal has no player, so two beeps go through PowerShell ($.process.run);
- * Linux plays nothing. Never awaited by the step that saw the call.
+ * Plays an event's sound (plan 09). macOS through the engine's player; a
+ * Windows terminal has none, so PowerShell plays the file (its SoundPlayer),
+ * else beeps the event's tune; Linux through paplay, else aplay. Nothing here
+ * is awaited by what raised it.
  */
-async function ding($: EngineInterface, options: Options): Promise<void> {
-  if (options.advisorSound !== true) return
-  const now = await $.clock.now()
-  if (now - lastSound < SOUND_GAP_MS) return
-  lastSound = now
+async function playSound($: EngineInterface, event: SoundEvent): Promise<void> {
   sysname ??= (await $.session.machine().catch(() => undefined))?.sysname ?? ''
-  if (sysname === 'Darwin') await $.audio.play({ asset: ADVISOR_CHIME }).catch(() => undefined)
-  else if (sysname.startsWith('Windows')) {
-    await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_BEEP], { timeoutMs: 5000 }).catch(() => undefined)
+  if (sysname === 'Darwin') {
+    await $.audio.play({ asset: soundFile(event) }).catch(() => undefined)
+    return
   }
+  const root = await rootOf($)
+  if (sysname.startsWith('Windows')) {
+    if (root) {
+      const file = `${root.replace(/[\\/]+$/, '')}\\${soundFile(event).replace('/', '\\')}`
+      const play = `(New-Object System.Media.SoundPlayer '${file.replace(/'/g, "''")}').PlaySync()`
+      const played = await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', play], { timeoutMs: 8000 }).catch(() => undefined)
+      if (played?.exitCode === 0) return
+    }
+    const beeps = SOUND_BEEPS[event].map(([hz, ms]) => `[console]::beep(${hz},${ms})`).join('; ')
+    await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', beeps], { timeoutMs: 5000 }).catch(() => undefined)
+    return
+  }
+  if (!root) return
+  const file = `${root.replace(/\/+$/, '')}/${soundFile(event)}`
+  for (const argv of [['paplay', file], ['aplay', '-q', file]]) {
+    const played = await $.process.run(argv, { timeoutMs: 5000 }).catch(() => undefined)
+    if (played?.exitCode === 0) return
+  }
+}
+
+/** The events the last change of state raised (sounds.ts): the one that sounds now, unawaited. */
+function listen($: EngineInterface, now: number): void {
+  if (!mem) return
+  const thresholds = thresholdsOf(current)
+  const before = heard
+  heard = heardOf(mem, thresholds)
+  if (!before) return
+  const event = pickSound(soundEvents(before, mem, thresholds), e => soundOn(current, e), lastSounds, now)
+  if (!event) return
+  lastSounds[event] = now
+  lastSounds.any = now
+  void playSound($, event).catch(() => undefined)
+}
+
+/** The HUD's boot sequence, from now: once a process, with the HUD on and motion on. */
+async function startBoot($: EngineInterface, options: Options): Promise<void> {
+  if (poweredUp || bootAt !== undefined || !animate || options.hud === false) return
+  bootAt = await $.clock.now().catch(() => undefined)
+}
+
+/** The power-up, at the pane's first opening in this process. */
+function powerUp($: EngineInterface, options: Options): void {
+  if (poweredUp) return
+  poweredUp = true
+  if (soundOn(options, 'boot')) void playSound($, 'boot').catch(() => undefined)
+}
+
+/** Claude Code's theme as the HUD reads it: a dark one, a light one, or one of ANSI colors only. */
+let theme: ThemeKind = 'dark'
+
+async function readTheme($: EngineInterface): Promise<void> {
+  const value = await $.settings.read({ key: 'theme' }).catch(() => undefined)
+  const t = typeof value === 'string' ? value.toLowerCase() : ''
+  theme = t.includes('ansi') ? 'ansi' : t.startsWith('light') ? 'light' : 'dark'
 }
 
 /**
@@ -537,7 +615,7 @@ async function autoUpdate($: EngineInterface, isInteractive: boolean, options: O
 async function readOptionLocks($: EngineInterface): Promise<void> {
   const rows = await $.config.list()
   const mine = rows.filter(r => r.provider?.plugin === PLUGIN || r.key.startsWith(`${PLUGIN}.`))
-  const fieldOf = (key: string): OptionField | undefined => OPTION_ORDER.find(f => key === f || key.endsWith(`.${f}`))
+  const fieldOf = (key: string): OptionField | undefined => OPTION_FIELDS.find(f => key === f || key.endsWith(`.${f}`))
   const keys: Partial<Record<OptionField, string>> = {}
   const locked: OptionField[] = []
   for (const r of mine) {
@@ -553,17 +631,28 @@ async function readOptionLocks($: EngineInterface): Promise<void> {
 /** The options as in effect, for the options page. */
 function settingsOf(options: Options): Settings {
   const t = thresholdsOf(options)
+  // A switch as set, else its default.
+  const flag = (f: OptionField): boolean => flagOf(options, f)
   return {
     values: {
-      openOnStart: options.openOnStart !== false,
-      animate: options.animate !== false,
+      openOnStart: flag('openOnStart'),
+      animate: flag('animate'),
+      hud: flag('hud'),
       columns: columnsOf(options),
       logRows: logRowsOf(options),
       limitWarnAt: t.warn,
       limitAlertAt: t.alert,
       bandLine: bandOn(options),
-      advisorSound: options.advisorSound === true,
-      autoUpdate: options.autoUpdate !== false,
+      sound: flag('sound'),
+      advisorSound: flag('advisorSound'),
+      soundSpawn: flag('soundSpawn'),
+      soundDone: flag('soundDone'),
+      soundFailed: flag('soundFailed'),
+      soundWaiting: flag('soundWaiting'),
+      soundTurn: flag('soundTurn'),
+      soundAlert: flag('soundAlert'),
+      soundBoot: flag('soundBoot'),
+      autoUpdate: flag('autoUpdate'),
     },
     locked: lockedOptions,
   }
@@ -623,12 +712,25 @@ async function boot($: EngineInterface, isInteractive: boolean, options: Options
 
   lang = await readLang($)
   await restorePrefs($)
+  await readTheme($)
+  // What the session already holds when the mod starts sounds nothing.
+  heard = heardOf(mem, thresholdsOf(options))
 
   commandName = await registerCommand($)
   if (isInteractive && options.openOnStart !== false) {
+    // A change of options reloads the plugin and this runs again with the pane
+    // already open: the power-up sounds only for a pane that was not.
+    const before = await $.ui.panes().catch(() => [])
+    const wasOpen = before.some(p => p.id === PANE && p.isShown)
+    if (!wasOpen) await startBoot($, options)
     void $.ui
       .open({ id: PANE, title: TITLE, columns: columnsOf(options) })
-      .then(() => paneMoved($))
+      .then(opened => {
+        if (opened.isPlaced && !wasOpen) powerUp($, options)
+        // Not placed: no boot is under way; the next opening boots.
+        if (!opened.isPlaced && !poweredUp) bootAt = undefined
+        return paneMoved($)
+      })
       .catch(() => undefined)
   }
 
@@ -645,9 +747,14 @@ async function treeCommand($: EngineInterface, args: string, options: Options): 
     await paneMoved($)
     return { text: wordsFor(lang).command.closed }
   }
+  const before = await $.ui.panes().catch(() => [])
+  const wasOpen = before.some(p => p.id === PANE && p.isShown)
+  if (!wasOpen) await startBoot($, options)
   const opened = await $.ui
     .open({ id: PANE, title: TITLE, columns: columnsOf(options), focus: true })
     .catch((err: unknown) => ({ isPlaced: false as const, reason: String(err) }))
+  if (opened.isPlaced && !wasOpen) powerUp($, options)
+  if (!opened.isPlaced && !poweredUp) bootAt = undefined
   await paneMoved($)
   const said = wordsFor(lang).command
   return { text: opened.isPlaced ? said.opened : said.waits(String(opened.reason)) }
@@ -694,9 +801,19 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
       return
     }
     case 'options': {
-      // The locks read first, so the page draws them at once.
+      // The locks read first, so the page draws them at once. The sounds page goes back to the options page.
       await readOptionLocks($).catch(() => undefined)
       await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, view: u.view === 'options' ? 'tree' : 'options', picker: undefined, pickerFor: undefined }))
+      return
+    }
+    case 'sounds': {
+      await readOptionLocks($).catch(() => undefined)
+      await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, view: u.view === 'sounds' ? 'options' : 'sounds', picker: undefined, pickerFor: undefined }))
+      return
+    }
+    case 'testSound': {
+      // To hear it: it plays whatever the switches say.
+      void playSound($, press.event).catch(() => undefined)
       return
     }
     case 'option': {
@@ -708,6 +825,9 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
       return
     }
     case 'picker': {
+      // The HUD unfolds a panel as it opens: its time set before the drawing that brings it.
+      const before = await read($, uiState).catch(() => undefined)
+      if (!(before?.picker === press.id && before?.pickerFor === press.agentId)) panelAt = await $.clock.now().catch(() => undefined)
       await update($, uiState, (u: TreeUi): TreeUi => {
         const open = u.picker === press.id && u.pickerFor === press.agentId
         // One panel at a time: a choice panel closes the message panel; what was typed stays a draft.
@@ -722,6 +842,9 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
     case 'compose': {
       const agentId = press.agentId
       composeValue = drafts.get(agentId)
+      // The HUD unfolds the message panel as it opens: its time set before the drawing that brings it.
+      const before = await read($, uiState).catch(() => undefined)
+      if (before?.compose !== agentId) panelAt = await $.clock.now().catch(() => undefined)
       let opened = false
       await update($, uiState, (u: TreeUi): TreeUi => {
         opened = u.compose !== agentId
@@ -1042,10 +1165,12 @@ function style(seg: Seg): TextProps {
   if (seg.color !== undefined) props.color = seg.color
   if (seg.dim) props.dimColor = true
   if (seg.bold) props.bold = true
+  if (seg.bg !== undefined) props.backgroundColor = seg.bg
   return props
 }
 
 export const register: Register = (on, options: Options) => {
+  current = options
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await boot($, e.isInteractive, options).catch(() => undefined)
@@ -1088,7 +1213,6 @@ export const register: Register = (on, options: Options) => {
         .map(use => ({ startedAt: use.startedAt, endedAt: use.endedAt }))
       const facts = { agentId: e.agentId, model: model !== undefined ? (result.usage?.model ?? model) : e.model, effort: effortText(sent.effort), advisor }
       note($, (s, now) => stepped(s, facts, now), advisor.length > 0)
-      if (advisor.length > 0) void ding($, options).catch(() => undefined)
     } catch {
       // The stream went on whatever the note did.
     }
@@ -1239,7 +1363,11 @@ export const register: Register = (on, options: Options) => {
   // The person closes the pane: the line above the prompt takes over.
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
-    if (e.id === PANE) await paneMoved($)
+    if (e.id === PANE) {
+      // Closed, it draws nothing more: the idle pace stops until it is drawn again.
+      shimmering = false
+      await paneMoved($)
+    }
     return result
   }).catch(($, e, next) => next(e))
 
@@ -1284,6 +1412,10 @@ export const register: Register = (on, options: Options) => {
       draft: composeValue,
       limits: thresholdsOf(options),
       settings: settingsOf(options),
+      look: options.hud !== false ? 'hud' : 'classic',
+      theme,
+      ...(bootAt !== undefined ? { bootAt } : {}),
+      ...(panelAt !== undefined ? { openedAt: panelAt } : {}),
     })
     shimmering = hasLiveCell(rows)
     const act = (press: Press) => () => {

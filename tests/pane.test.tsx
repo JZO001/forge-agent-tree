@@ -73,8 +73,6 @@ type World = {
    * command's exit code (0 installs the newer one).
    */
   update?: { id?: string; installed?: string; latest?: string; exit?: number }
-  /** The plugin's folder, as `$.process.hookEnv()` names it (`CLAUDE_PLUGIN_ROOT`); none when not given. */
-  pluginRoot?: string
   /** The session is interactive (a terminal); `false` for a `claude -p` run. */
   interactive?: boolean
   /** How a sound player exits (0 played it). */
@@ -197,7 +195,6 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
     }
   })
   mock.env(on, world.env ?? {})
-  on('process.hookEnv', () => ({ value: (world.pluginRoot ? { CLAUDE_PLUGIN_ROOT: world.pluginRoot } : {}) as Record<string, string> }))
   // The mod's own manifest beneath, under its folder: what the help shows as its version.
   on('fs.read', (_, e) => {
     if (!String(e.path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json') || world.manifest === null) throw new Error(`ENOENT: ${e.path}`)
@@ -997,25 +994,24 @@ test('with the advisor’s sound on, macOS plays the uplink, once for calls clos
   expect(sounds).toHaveLength(1)
 })
 
-test('on Windows PowerShell plays the sound file from the plugin’s folder', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
-  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', pluginRoot: 'C:\\plugins\\forge' })
-  await step($, undefined, 'high')
-  await clock.advance(500)
-  expect(sounds).toEqual(["run powershell.exe -NoProfile -NonInteractive -Command (New-Object System.Media.SoundPlayer 'C:\\plugins\\forge\\sounds\\advisor.wav').PlaySync()"])
-})
+// The sounds' folder is the plugin's own, `$.plugin.root` (the user's request of 2026-11-20; it was
+// `CLAUDE_PLUGIN_ROOT` from `$.process.hookEnv()`). In the kit that is the repository's folder,
+// wherever it was checked out, so these name the file under it, not the folder itself.
 
-test('on Windows with no plugin folder to read, the event beeps its tune instead', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
+test('on Windows PowerShell plays the sound file from the plugin’s folder', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
   const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT' })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toEqual(['run powershell.exe -NoProfile -NonInteractive -Command [console]::beep(1319,70); [console]::beep(1976,90)'])
+  expect(sounds).toHaveLength(1)
+  expect(sounds[0]).toMatch(/^run powershell\.exe -NoProfile -NonInteractive -Command \(New-Object System\.Media\.SoundPlayer '[^']+\\sounds\\advisor\.wav'\)\.PlaySync\(\)$/)
 })
 
 test('on Linux paplay plays the sound file', { options: { sound: true, advisorSound: true, soundSpawn: false, soundBoot: false } }, async ($, on) => {
-  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', pluginRoot: '/opt/forge' })
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux' })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toEqual(['run paplay /opt/forge/sounds/advisor.wav'])
+  expect(sounds).toHaveLength(1)
+  expect(sounds[0]).toMatch(/^run paplay \S.*\/sounds\/advisor\.wav$/)
 })
 
 test('the power-up sounds when the pane opens at the start; with its switch on, the deployed agent too', { options: { soundSpawn: true } }, async ($, on) => {
@@ -1445,20 +1441,22 @@ test('an option is set under the key /config lists for it; a refusal says why', 
 })
 
 test('on Windows, a sound file that will not play beeps its tune instead', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {
-  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', pluginRoot: 'C:\\plugins\\forge', playerExit: 1 })
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', playerExit: 1 })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toEqual([
-    "run powershell.exe -NoProfile -NonInteractive -Command (New-Object System.Media.SoundPlayer 'C:\\plugins\\forge\\sounds\\advisor.wav').PlaySync()",
-    'run powershell.exe -NoProfile -NonInteractive -Command [console]::beep(1319,70); [console]::beep(1976,90)',
-  ])
+  expect(sounds).toHaveLength(2)
+  expect(sounds[0]).toMatch(/^run powershell\.exe -NoProfile -NonInteractive -Command \(New-Object System\.Media\.SoundPlayer '[^']+\\sounds\\advisor\.wav'\)\.PlaySync\(\)$/)
+  expect(sounds[1]).toBe('run powershell.exe -NoProfile -NonInteractive -Command [console]::beep(1319,70); [console]::beep(1976,90)')
 })
 
 test('on Linux, where paplay does not play it, aplay does', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {
-  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', pluginRoot: '/opt/forge', playerExit: 1 })
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', playerExit: 1 })
   await step($, undefined, 'high')
   await clock.advance(500)
-  expect(sounds).toEqual(['run paplay /opt/forge/sounds/advisor.wav', 'run aplay -q /opt/forge/sounds/advisor.wav'])
+  expect(sounds).toHaveLength(2)
+  expect(sounds[0]).toMatch(/^run paplay \S.*\/sounds\/advisor\.wav$/)
+  // the same file, the other player
+  expect(sounds[1]).toBe(sounds[0]!.replace('run paplay ', 'run aplay -q '))
 })
 
 test('a server tool that is not the advisor is no advisor call', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {

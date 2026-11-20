@@ -514,8 +514,6 @@ let current: Options = {}
 
 /** The system the session runs on, as `uname -s` names it (`Darwin`, `Windows_NT`, `Linux`). */
 let sysname: string | undefined
-/** The plugin's folder, where its sounds are (`CLAUDE_PLUGIN_ROOT`); null where it could not be read. */
-let pluginRoot: string | null | undefined
 /** When each event last sounded, and any sound (`any`). */
 const lastSounds: Record<string, number> = {}
 /** What the sounds last heard of the session, to tell what changed (sounds.ts). */
@@ -550,10 +548,16 @@ function flagOf(options: Options, field: OptionField): boolean {
   return typeof v === 'boolean' ? v : DEFAULT_SETTINGS[field] === true
 }
 
-/** The plugin's own folder, read once. */
-async function rootOf($: EngineInterface): Promise<string | null> {
-  if (pluginRoot === undefined) pluginRoot = (await $.process.hookEnv().catch(() => ({}) as Record<string, string>)).CLAUDE_PLUGIN_ROOT ?? null
-  return pluginRoot
+/**
+ * The plugin's own folder, where its sounds are: `$.plugin.root`, the engine's
+ * own word for it (an installed copy's and a `--plugin-dir` copy's alike).
+ * It replaced `CLAUDE_PLUGIN_ROOT` from `$.process.hookEnv()`, which was never
+ * shown to name a `--plugin-dir` copy (the user's request of 2026-11-20).
+ * None where it is not a folder's path.
+ */
+function rootOf($: EngineInterface): string | null {
+  const root = $.plugin.root
+  return typeof root === 'string' && root.trim() !== '' ? root : null
 }
 
 /** The system the session runs on, read once (`Darwin`, `Windows_NT`, `Linux`; empty where it could not be read). */
@@ -574,7 +578,7 @@ async function playSound($: EngineInterface, event: SoundEvent): Promise<void> {
     await $.audio.play({ asset: soundFile(event) }).catch(() => undefined)
     return
   }
-  const root = await rootOf($)
+  const root = rootOf($)
   if (sysname.startsWith('Windows')) {
     if (root) {
       const file = `${root.replace(/[\\/]+$/, '')}\\${soundFile(event).replace('/', '\\')}`

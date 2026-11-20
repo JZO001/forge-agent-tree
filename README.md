@@ -9,7 +9,7 @@
 
 **Where and with what**
 - Claude Code 2.1.328 or newer, in its terminal interface, on Windows, macOS or Linux. It runs on Claude Code's mods API, which is early access and may change between releases.
-- The pane docks beside the chat in fullscreen mode when the terminal is wide enough (about 110 columns); otherwise `/tree` opens it.
+- The pane docks beside the chat in fullscreen mode when the terminal is wide enough (about 110 columns); otherwise `/tree` opens it (see [The pane does not show up?](#the-pane-does-not-show-up-type-tree)).
 - Its interface speaks 23 languages. It comes in a sci-fi look, the Forge HUD, or a classic one, with optional sounds and notifications.
 
 It watches, and changes nothing unless you pick something in the pane. It makes no model calls, and its only network call is a daily check for its own update, which you can switch off (see [Updates](#updates) and [PRIVACY.md](PRIVACY.md)).
@@ -77,6 +77,15 @@ Inside a session:
 ```text
 /plugin install forge-agent-tree --marketplace JZO001/forge-agent-tree
 ```
+
+### The pane does not show up? Type `/tree`
+
+The pane opens by itself only when a session starts, in Claude Code's fullscreen mode, in a terminal about 110 columns wide or more. Anywhere else nothing shows at first, and that is expected:
+
+- **Type `/tree` in the prompt.** It opens the pane: beside the chat in a wide fullscreen terminal, else inline above the prompt. `/tree close` closes it, and `/tree` brings it back.
+- **Just installed it inside a running session?** Run `/reload-plugins` or restart Claude Code first, so the mod loads.
+- **No `/tree` command?** If another plugin already uses the name, the mod's command is `/forge-tree`.
+- **Open on start** (an option, on by default; `o` in the pane, or `/config`) decides whether it opens by itself at all.
 
 ## Use
 

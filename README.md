@@ -34,6 +34,29 @@ It watches, and changes nothing unless you pick something in the pane. It makes 
   </tr>
 </table>
 
+## Install
+
+From a terminal:
+
+```bash
+claude plugin install forge-agent-tree --marketplace JZO001/forge-agent-tree
+```
+
+Inside a session:
+
+```text
+/plugin install forge-agent-tree --marketplace JZO001/forge-agent-tree
+```
+
+### The pane does not show up? Type `/tree`
+
+The pane opens by itself only when a session starts, in Claude Code's fullscreen mode, in a terminal about 110 columns wide or more. Anywhere else nothing shows at first, and that is expected:
+
+- **Type `/tree` in the prompt.** It opens the pane: beside the chat in a wide fullscreen terminal, else inline above the prompt. `/tree close` closes it, and `/tree` brings it back.
+- **Just installed it inside a running session?** Run `/reload-plugins` or restart Claude Code first, so the mod loads.
+- **No `/tree` command?** If another plugin already uses the name, the mod's command is `/forge-tree`.
+- **Open on start** (an option, on by default; `o` in the pane, or `/config`) decides whether it opens by itself at all.
+
 ## How it behaves
 
 The mod watches. It changes something only when you pick it in the pane:
@@ -63,29 +86,6 @@ Claude Code sends a notification through the channel its settings name (`/config
 - **Windows decides whether the banner shows**: in Do not disturb, or with notifications turned off for Windows PowerShell, it only lands in the notification center.
 
 The notifications page shows what came of the last one under its heading (`last: ✓ sent as a Windows notification`, or why nothing was shown), and `►` there sends a test of any event now.
-
-## Install
-
-From a terminal:
-
-```bash
-claude plugin install forge-agent-tree --marketplace JZO001/forge-agent-tree
-```
-
-Inside a session:
-
-```text
-/plugin install forge-agent-tree --marketplace JZO001/forge-agent-tree
-```
-
-### The pane does not show up? Type `/tree`
-
-The pane opens by itself only when a session starts, in Claude Code's fullscreen mode, in a terminal about 110 columns wide or more. Anywhere else nothing shows at first, and that is expected:
-
-- **Type `/tree` in the prompt.** It opens the pane: beside the chat in a wide fullscreen terminal, else inline above the prompt. `/tree close` closes it, and `/tree` brings it back.
-- **Just installed it inside a running session?** Run `/reload-plugins` or restart Claude Code first, so the mod loads.
-- **No `/tree` command?** If another plugin already uses the name, the mod's command is `/forge-tree`.
-- **Open on start** (an option, on by default; `o` in the pane, or `/config`) decides whether it opens by itself at all.
 
 ## Use
 

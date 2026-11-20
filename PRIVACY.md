@@ -4,7 +4,7 @@ Agent Tree // Forge runs inside Claude Code on your machine. It reads what Claud
 
 ## What leaves your machine
 
-The mod sends nothing except its update check. The check is on by default and you can switch it off.
+The mod itself sends nothing except its update check. The check is on by default and you can switch it off. Its notifications go through Claude Code (see [Notifications](#notifications)).
 
 **The update check** runs at most once a day, when an interactive session starts:
 
@@ -19,6 +19,16 @@ The mod sends nothing except its update check. The check is on by default and yo
 - the **Auto-update** option on the pane's options page (`o`), or in `/config`;
 - any of these environment variables, set to anything other than empty, `0` or `false`: `DO_NOT_TRACK`, `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
 
+## Notifications
+
+With the **Notifications** option on (on by default), the mod raises a notification when an agent waits for you, an agent or a workflow run fails, a workflow run finishes, the main answer is done, or a red alert rises. Its text names the agent, the workflow run or the start of your last prompt.
+
+- It goes through **your own notification channel**, the one Claude Code's settings name (`/config`). Your own `Notification` hooks see it first.
+- **In a terminal** the channel writes it to the terminal, which may show it as a system notification.
+- **In the Claude desktop app, or a session you follow remotely,** Claude Code hands it to the app, which raises it on your devices.
+- **On Windows, where Claude Code has no notification channel in the terminal** (Windows Terminal, for one), the mod shows it itself as a Windows notification, through Windows PowerShell. It stays on your machine, in Windows' notification center. Never where you turned notifications off in Claude Code.
+- The mod sends it nowhere else. Switch them all, or each event, off on the options page (`o`, then `Notification events`).
+
 ## What stays on your machine
 
 **In the mod's own store** (under `~/.claude/plugins/`):
@@ -32,4 +42,4 @@ The mod sends nothing except its update check. The check is on by default and yo
 - the options, kept as `/config` keeps them;
 - a model, effort or advisor you pick in the pane: the pane runs `/model`, `/effort` or `/advisor` for you, and Claude Code saves the choice as those commands do.
 
-**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its only other local processes play its sounds: in an interactive session with the Sound option on (on by default; switch it off on the options page), and when you press ► on the sounds page to hear one: PowerShell on Windows, `paplay` or `aplay` on Linux. They play the plugin's own sound files and send nothing anywhere.
+**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its only other local processes play its sounds: in an interactive session with the Sound option on (on by default; switch it off on the options page), and when you press ► on the sounds page to hear one: PowerShell on Windows, `paplay` or `aplay` on Linux. They play the plugin's own sound files and send nothing anywhere. On Windows, PowerShell also shows the mod's notifications where Claude Code has no channel (see [Notifications](#notifications)).

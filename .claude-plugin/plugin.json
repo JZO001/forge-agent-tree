@@ -119,6 +119,42 @@
       "description": "When the pane first opens in a session (with Sound on)",
       "default": true
     },
+    "notify": {
+      "type": "boolean",
+      "title": "Notifications",
+      "description": "Every notification of the pane at once, through Claude Code's notification channel; where it has none in the terminal, on Windows a Windows notification. Each event has its own switch on the notifications page (o, then Notification events)",
+      "default": true
+    },
+    "notifyWaiting": {
+      "type": "boolean",
+      "title": "Notify: agent waiting",
+      "description": "When an agent starts waiting for you (with Notifications on)",
+      "default": true
+    },
+    "notifyFailed": {
+      "type": "boolean",
+      "title": "Notify: failure",
+      "description": "When an agent or a workflow run fails (with Notifications on)",
+      "default": true
+    },
+    "notifyRun": {
+      "type": "boolean",
+      "title": "Notify: workflow done",
+      "description": "When a workflow run finishes well (with Notifications on)",
+      "default": true
+    },
+    "notifyTurn": {
+      "type": "boolean",
+      "title": "Notify: turn complete",
+      "description": "When the main session’s answer is done (with Notifications on)",
+      "default": true
+    },
+    "notifyAlert": {
+      "type": "boolean",
+      "title": "Notify: red alert",
+      "description": "When the context reaches 90% or a limit its red mark (with Notifications on)",
+      "default": true
+    },
     "autoUpdate": {
       "type": "boolean",
       "title": "Auto-update",

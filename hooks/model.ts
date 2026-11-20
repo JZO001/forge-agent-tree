@@ -80,7 +80,8 @@ function patchAgent(s: TreeState, id: string, change: (a: TreeAgent) => TreeAgen
   return { ...s, agents: s.agents.map(a => (a.id === id ? change(a) : a)) }
 }
 
-function labelOf(a: TreeAgent): string {
+/** An agent's name in the log and the notifications: its task's description, else its type. */
+export function labelOf(a: TreeAgent): string {
   return a.description || a.type || 'agent'
 }
 
@@ -210,7 +211,8 @@ function patchRun(s: TreeState, id: string, change: (r: TreeRun) => TreeRun): Tr
   return { ...s, runs: (s.runs ?? []).map(r => (r.id === id ? change(r) : r)) }
 }
 
-function runLabel(r: TreeRun): string {
+/** A workflow run's name: the script's `meta.name`, else `workflow`. */
+export function runLabel(r: TreeRun): string {
   return r.name || 'workflow'
 }
 

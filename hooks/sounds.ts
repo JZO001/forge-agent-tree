@@ -4,7 +4,7 @@
  * them all. Only decisions here: which events a change of state raises, and
  * which one sounds now. register.tsx plays them.
  */
-import type { AgentState, TreeAgent, TreeState } from '../types'
+import type { AgentState, TreeAgent, TreeRun, TreeState } from '../types'
 import { LIMIT_THRESHOLDS } from './format'
 import type { LimitThresholds } from './format'
 import { isMember, runEnded, runFailed } from './model'
@@ -131,43 +131,60 @@ function freshSince(prev: Heard, startedAt: number): boolean {
 }
 
 /**
- * The events a change of state raises, each once. A workflow run's agents are
+ * One thing a change of state tells: the event, and whom it is about, an agent
+ * or a workflow run (neither for the main turn, an advisor call, the alert).
+ * The sounds hear only the event; the notifications (notices.ts) also who.
+ */
+export type Change = { event: SoundEvent; agent?: TreeAgent; run?: TreeRun }
+
+/**
+ * What a change of state tells, one entry each. A workflow run's agents are
  * not heard starting or ending well (as the log does not tell of them), only
  * failing; the run's own end is. One that started since the last hearing and
- * has already ended (a subagent whose first request failed) sounds as it ended;
+ * has already ended (a subagent whose first request failed) tells how it ended;
  * one first seen long ended (the list found it) says nothing.
  */
-export function soundEvents(prev: Heard, s: TreeState, thresholds?: LimitThresholds): SoundEvent[] {
-  const out = new Set<SoundEvent>()
+export function heardChanges(prev: Heard, s: TreeState, thresholds?: LimitThresholds): Change[] {
+  const out: Change[] = []
   for (const a of s.agents) {
     if (!audible(a)) continue
     const before = prev.agents[a.id]
     const member = isMember(s, a)
     if (before === undefined) {
-      if (!member && ACTIVE.includes(a.state)) out.add('spawn')
-      if (a.state === 'waiting') out.add('waiting')
+      if (!member && ACTIVE.includes(a.state)) out.push({ event: 'spawn', agent: a })
+      if (a.state === 'waiting') out.push({ event: 'waiting', agent: a })
       if (freshSince(prev, a.startedAt)) {
-        if (a.state === 'failed') out.add('failed')
-        if (a.state === 'done' && !member) out.add('done')
+        if (a.state === 'failed') out.push({ event: 'failed', agent: a })
+        if (a.state === 'done' && !member) out.push({ event: 'done', agent: a })
       }
       continue
     }
     if (before === a.state) continue
-    if (a.state === 'done' && !member) out.add('done')
-    if (a.state === 'failed') out.add('failed')
-    if (a.state === 'waiting') out.add('waiting')
+    if (a.state === 'done' && !member) out.push({ event: 'done', agent: a })
+    if (a.state === 'failed') out.push({ event: 'failed', agent: a })
+    if (a.state === 'waiting') out.push({ event: 'waiting', agent: a })
   }
   for (const r of s.runs ?? []) {
     const was = prev.runs[r.id]
     // A run heard at work that has now ended; one first seen ended only where it started since.
     if (!runEnded(r) || was === true || (was === undefined && !freshSince(prev, r.startedAt))) continue
-    if (runFailed(s, r)) out.add('failed')
-    else if (r.end === 'completed' || r.end === undefined) out.add('done')
+    if (runFailed(s, r)) out.push({ event: 'failed', run: r })
+    else if (r.end === 'completed' || r.end === undefined) out.push({ event: 'done', run: r })
   }
-  if (prev.busy && !s.main.isBusy) out.add('turn')
-  if (s.advisor.total > prev.advisor) out.add('advisor')
-  if (!prev.critical && isCritical(s, thresholds)) out.add('alert')
-  return PRIORITY.filter(e => out.has(e))
+  if (prev.busy && !s.main.isBusy) out.push({ event: 'turn' })
+  if (s.advisor.total > prev.advisor) out.push({ event: 'advisor' })
+  if (!prev.critical && isCritical(s, thresholds)) out.push({ event: 'alert' })
+  return out
+}
+
+/** The events a change of state sounds, each once, the most important first. */
+export function soundEvents(prev: Heard, s: TreeState, thresholds?: LimitThresholds): SoundEvent[] {
+  return soundEventsOf(heardChanges(prev, s, thresholds))
+}
+
+/** The events of what changed, each once, the most important first. */
+export function soundEventsOf(changes: readonly Change[]): SoundEvent[] {
+  return PRIORITY.filter(e => changes.some(c => c.event === e))
 }
 
 /**

@@ -93,6 +93,12 @@ type World = {
   claudeViaCmd?: boolean
   /** The version the mod's own manifest states (0.1.0 when not given); `null`: the manifest cannot be read. */
   manifest?: string | null
+  /** How the person's notification channel answers: sent through `client` when not given. */
+  notifyResult?: { isSent: true; channel: 'client' | 'terminal_bell' | 'iterm2' } | { isSent: false; reason: 'disabled' | 'no-channel' | 'no-surface' | 'refused' }
+  /** A hook beneath refuses a notification, for this reason (the call rejects). */
+  notifyDeny?: string
+  /** How Windows PowerShell exits when it shows a Windows notification (0 showed it). */
+  toastExit?: number
 }
 
 
@@ -155,6 +161,7 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   on('ui.panes', () => ({ value: world.panes ?? [] }))
   // Sound beneath: what was played, and what was run to play it.
   const sounds: string[] = []
+  const shown: string[] = []
   on('session.machine', () => ({ value: { sysname: world.sysname ?? 'Linux', release: '', machine: 'x86_64', packageManagers: [], runtimes: [] } }))
   on('audio.play', (_, e) => {
     sounds.push(`play ${e.clip.asset ?? '?'}`)
@@ -181,6 +188,11 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
         return ran('', code)
       }
       return ran('')
+    }
+    // A Windows notification (plan 14): its title and text, read back from the script.
+    if (e.argv[0] === 'powershell.exe' && String(e.argv[e.argv.length - 1]).includes('ToastNotificationManager')) {
+      shown.push(toastOf(String(e.argv[e.argv.length - 1])))
+      return ran('', world.toastExit ?? 0)
     }
     sounds.push(`run ${e.argv.join(' ')}`)
     return ran('', world.playerExit ?? 0)
@@ -220,6 +232,13 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
     configSets.push({ key: e.key, value: e.value })
     if (world.configRefuse) return { deny: world.configRefuse }
     return { value: e.value }
+  })
+  // Notifications beneath: what the mod sent, as the person's channel took it.
+  const notified: Array<{ text: string; title?: string; key?: string; delayMs?: number; at?: number; untilBack?: boolean }> = []
+  on('ui.notify', (_, e) => {
+    notified.push(e)
+    if (world.notifyDeny) return { deny: world.notifyDeny }
+    return { value: world.notifyResult ?? { isSent: true as const, channel: 'client' as const } }
   })
   const toasts: string[] = []
   on('ui.toast', (_, e) => {
@@ -295,10 +314,16 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   })
   await $.tool.call({ tool: 'Grep', pattern: 'src/auth/**', agentId: 'a1' })
   await clock.advance(1000)
-  return { clock, viewed, stored, commands, toasts, spawns, steps, stepModels, sounds, sent, configSets, updates, fetched, opens, closes }
+  return { clock, viewed, stored, commands, toasts, spawns, steps, stepModels, sounds, sent, configSets, updates, fetched, opens, closes, notified, shown }
 }
 
 /** Waits, in real time, until `done` holds (the mod's update runs unawaited), or `ms` pass. */
+/** A Windows notification's `title|text`, as PowerShell would show it: its XML's two texts read back from the script. */
+function toastOf(script: string): string {
+  const texts = [...script.matchAll(/<text>(.*?)<\/text>/g)].map(m => m[1]!.replace(/&#(\d+);/g, (_, c: string) => String.fromCodePoint(Number(c))))
+  return texts.join('|')
+}
+
 async function until(done: () => boolean, ms = 2000): Promise<void> {
   const end = Date.now() + ms
   const later = (globalThis as unknown as { setTimeout: (fn: () => void, ms: number) => unknown }).setTimeout
@@ -1302,17 +1327,273 @@ test('the options page switches Auto-update off as /config would', async ($, on)
   await ui.unmount()
 })
 
+// ── the whole tree a page at a time (plan 13) ───────────────────────────
+
+/** The pane docked, as tall as given. */
+function short(cols: number, bodyRows: number) {
+  const p = pane(cols)
+  return { ...p, props: { ...p.props, scroll: { offset: 0, bodyRows } } }
+}
+
+test('`+ n more` opens the whole tree a page at a time: ▼ and ▲ page through it, × goes back', async ($, on) => {
+  const { clock } = await session($, on)
+  for (let i = 1; i <= 20; i++) {
+    await $.agent.spawn({
+      tool_use_id: `tx${i}`,
+      prompt: 'help out',
+      description: `Extra ${i}`,
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: false,
+      fork: false,
+    })
+  }
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...short(56, 22), surface: 'terminal' })
+  expect(await ui.find({ text: /^└─ \+ \d+ more/ })).toBeDefined()
+  await ui.press({ key: 'more' })
+  const first = await ui.find({ text: /^▲  ▼  1–\d+ \/ 22 +×$/ })
+  expect(first).toBeDefined()
+  // the first page from the top: the session's own explorer; not the last one spawned
+  expect(await ui.find({ text: /Find auth handlers/ })).toBeDefined()
+  expect(await ui.find({ text: /Extra 20/ })).toBeUndefined()
+  // ▼ while there is somewhere to go: a page at a time, to the end
+  let presses = 0
+  while ((await ui.find({ key: 'tree:down' })) !== undefined && presses < 10) {
+    await ui.press({ key: 'tree:down' })
+    presses += 1
+  }
+  expect(presses >= 1 && presses < 10).toBe(true)
+  // the last page: the newest agent, ▼ with nowhere to go
+  expect(await ui.find({ text: /Extra 20/ })).toBeDefined()
+  expect(await ui.find({ text: /^▲  ▼  \d+–22 \/ 22 +×$/ })).toBeDefined()
+  await ui.press({ key: 'tree:up' })
+  expect(await ui.find({ text: /^▲  ▼  \d+–22 \/ 22 +×$/ })).toBeUndefined()
+  await ui.press({ key: 'tree:close' })
+  expect(await ui.find({ text: /^└─ \+ \d+ more/ })).toBeDefined()
+  expect(await ui.find({ key: 'tree:close' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('where the whole tree fits again, the page goes by itself: a later crowd shows the rows that matter most', async ($, on) => {
+  const { clock } = await session($, on)
+  for (let i = 1; i <= 20; i++) {
+    await $.agent.spawn({
+      tool_use_id: `tx${i}`,
+      prompt: 'help out',
+      description: `Extra ${i}`,
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: false,
+      fork: false,
+    })
+  }
+  await clock.advance(1000)
+  const small = await $.ui.mount({ ...short(56, 22), surface: 'terminal' })
+  await small.press({ key: 'more' })
+  expect(await small.find({ key: 'tree:close' })).toBeDefined()
+  await small.unmount()
+  // the pane drawn tall: the whole tree, and the page forgotten
+  const tall = await $.ui.mount({ ...short(56, 80), surface: 'terminal' })
+  expect(await tall.find({ key: 'tree:close' })).toBeUndefined()
+  await clock.advance(500)
+  await tall.unmount()
+  const again = await $.ui.mount({ ...short(56, 22), surface: 'terminal' })
+  expect(await again.find({ text: /^└─ \+ \d+ more/ })).toBeDefined()
+  expect(await again.find({ key: 'tree:close' })).toBeUndefined()
+  await again.unmount()
+})
+
+// ── notifications (plan 12) ─────────────────────────────────────────────
+
+/** The explorer the session spawned, as the agent list shows it. */
+function explorer(status: string): AgentInfo {
+  return { id: 'a1', description: 'Find auth handlers', type: 'Explore', status, kind: 'local_agent', taskStatus: 'running', startTime: T0, cwd: '/', model: 'claude-haiku-5-5', hasRow: true } as AgentInfo
+}
+
+/** The main turn on a prompt the person sent, at work for a while; then the explorer fails and the turn ends. */
+async function failAndFinish($: Engine, clock: { advance: (ms: number) => Promise<void> }): Promise<void> {
+  await $.prompt.submit({ text: 'Move the API to Rust', wait: false, origin: { kind: 'composer' }, turnId: 'm1' })
+  await $.turn.start({ text: 'Move the API to Rust', turnId: 'm1' })
+  await clock.advance(500)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'error' })
+  await $.turn.complete({ answer: 'ok', durationMs: 900, isAborted: false, turnId: 'm1', reason: 'answer' })
+}
+
+test('an agent that starts waiting is notified through the person’s channel: titled, keyed by its kind, held by a host until they are away', async ($, on) => {
+  const agents = [explorer('running')]
+  const { clock, notified } = await session($, on, agents)
+  await clock.advance(1500)
+  expect(notified).toEqual([])
+  agents[0] = explorer('waiting')
+  await clock.advance(1500)
+  expect(notified).toEqual([{ text: 'Agent waiting: Find auth handlers', title: 'Agent Tree // Forge', key: 'forge:waiting', delayMs: 20_000, untilBack: true }])
+})
+
+test('a failure and the main turn’s end, each at once; another failure within 30 s waits, then goes out', async ($, on) => {
+  const { clock, notified } = await session($, on)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified.map(n => n.text)).toEqual(['Failure: Find auth handlers', 'Turn complete: Move the API to Rust'])
+  expect(notified.map(n => n.key)).toEqual(['forge:failed', 'forge:turn'])
+  await spawn($)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
+  await clock.advance(5000)
+  expect(notified).toHaveLength(2)
+  await clock.advance(30_000)
+  expect(notified.map(n => n.text).slice(2)).toEqual(['Failure: Check routes'])
+})
+
+test('with Notifications off nothing is notified', { options: { notify: false } }, async ($, on) => {
+  const { clock, notified } = await session($, on)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified).toEqual([])
+})
+
+test('an event switched off alone is not notified; the others are', { options: { notifyTurn: false } }, async ($, on) => {
+  const { clock, notified } = await session($, on)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified.map(n => n.text)).toEqual(['Failure: Find auth handlers'])
+})
+
+test('one the channel does not send, or a hook refuses, says nothing: no toast, and the next still goes out', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', notifyResult: { isSent: false, reason: 'no-channel' } }
+  const { clock, notified, toasts } = await session($, on, [], world)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified).toHaveLength(2)
+  world.notifyDeny = 'not now'
+  await spawn($)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
+  await clock.advance(31_000)
+  expect(notified).toHaveLength(3)
+  expect(toasts).toEqual([])
+})
+
+test('a session swap drops what was waiting to be merged: the old session’s news does not reach the new one', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5' }
+  const { clock, notified } = await session($, on, [], world)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified).toHaveLength(2)
+  // another failure within the gap: it waits to be merged
+  await spawn($)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
+  await clock.advance(1000)
+  world.id = 's2'
+  await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
+  await clock.advance(31_000)
+  expect(notified).toHaveLength(2)
+})
+
+test('where Claude Code has no channel in the terminal, on Windows a Windows notification shows it; the notifications page says so', { options: { soundBoot: false } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', notifyResult: { isSent: false, reason: 'no-channel' } }
+  const { clock, shown, toasts } = await session($, on, [], world)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  await until(() => shown.length >= 2)
+  expect(shown).toEqual(['Agent Tree // Forge|Failure: Find auth handlers', 'Agent Tree // Forge|Turn complete: Move the API to Rust'])
+  expect(toasts).toEqual([])
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'notices' })
+  expect(await ui.find({ text: /^last: ✓ sent as a Windows notification +\d\d:\d\d$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('no Windows notification elsewhere, nor where notifications are off in Claude Code; the page tells why nothing showed', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', notifyResult: { isSent: false, reason: 'no-channel' } }
+  const { clock, shown } = await session($, on, [], world)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(shown).toEqual([])
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'notices' })
+  expect(await ui.find({ text: /^last: ✗ no notification was shown \(no-channel\) +\d\d:\d\d$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on Windows with notifications turned off in Claude Code: the person’s choice, nothing in their place, and the test says why', { options: { soundBoot: false } }, async ($, on) => {
+  // the system is read once a session: this one starts on Windows
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', notifyResult: { isSent: false, reason: 'disabled' } }
+  const { clock, shown, notified, toasts } = await session($, on, [], world)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified).toHaveLength(2)
+  expect(shown).toEqual([])
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'notices' })
+  await ui.press({ key: 'notice:waiting' })
+  await clock.advance(10)
+  expect(shown).toEqual([])
+  expect(toasts.at(-1)).toBe('Agent Tree // Forge: no notification was shown (disabled) · notifications are off in Claude Code · /config')
+  await ui.unmount()
+})
+
+test('► on Windows with no channel: a Windows notification, and the toast says so; where PowerShell cannot show it, the toast says nothing showed, and why', { options: { soundBoot: false } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', notifyResult: { isSent: false, reason: 'no-channel' } }
+  const { clock, shown, toasts } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'notices' })
+  await ui.press({ key: 'notice:waiting' })
+  await clock.advance(10)
+  expect(shown).toEqual(['Agent Tree // Forge|Agent waiting: test'])
+  expect(toasts.at(-1)).toBe('Agent Tree // Forge: sent as a Windows notification · Claude Code has no notification channel in this terminal')
+  world.toastExit = 1
+  await ui.press({ key: 'notice:failed' })
+  await clock.advance(10)
+  expect(toasts.at(-1)).toBe('Agent Tree // Forge: no notification was shown (no-channel) · Claude Code has no notification channel in this terminal · /config')
+  expect(await ui.find({ text: /^last: ✗ no notification was shown \(no-channel\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the options page holds the switch for them all and the row to the notifications page; ► there sends one now, whatever the switches say', { options: { notify: false } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5' }
+  const { clock, notified, toasts, configSets } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  expect(await ui.find({ text: /^Notifications +off$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Notification events +5\/5 ▸$/ })).toBeDefined()
+  await ui.press({ key: 'notices' })
+  expect(await ui.find({ text: /^Notifications$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Agent waiting +► +on$/ })).toBeDefined()
+  // sent now, with no delay: the person is right here
+  await ui.press({ key: 'notice:waiting' })
+  await clock.advance(10)
+  expect(notified).toEqual([{ text: 'Agent waiting: test', title: 'Agent Tree // Forge', key: 'forge:test:waiting' }])
+  expect(toasts).toEqual(['Agent Tree // Forge: test notification sent (client)'])
+  // not sent: the toast says why, and where the channel is set
+  world.notifyResult = { isSent: false, reason: 'no-channel' }
+  await ui.press({ key: 'notice:failed' })
+  await clock.advance(10)
+  expect(toasts.at(-1)).toBe('Agent Tree // Forge: no notification was shown (no-channel) · Claude Code has no notification channel in this terminal · /config')
+  await ui.press({ key: 'option:notifyWaiting' })
+  expect(configSets).toEqual([{ key: 'forge-agent-tree.notifyWaiting', value: false }])
+  // o goes back to the options page
+  await ui.press({ key: 'key-options' })
+  expect(await ui.find({ text: /^Options/ })).toBeDefined()
+  await ui.unmount()
+})
+
 // ── found in the review of 2026-11-20 ───────────────────────────────────
 
-test('a `claude -p` run: no pane, no sound, no update check', async ($, on) => {
+test('a `claude -p` run: no pane, no sound, no notification, no update check', async ($, on) => {
   const world: World = { id: 's1', model: 'claude-opus-5-5', interactive: false, sysname: 'Darwin', update: { installed: '0.1.0', latest: '0.1.1' } }
-  const { clock, sounds, opens, updates, fetched } = await session($, on, [], world)
+  const { clock, sounds, opens, updates, fetched, notified } = await session($, on, [], world)
   // an agent fails, a turn ends: an interactive session would sound them
   await $.turn.complete({ answer: '', durationMs: 10, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'error' })
   await clock.advance(1000)
   await until(() => false, 150)
   expect(opens).toEqual([])
   expect(sounds).toEqual([])
+  expect(notified).toEqual([])
   expect(updates).toEqual([])
   expect(fetched).toEqual([])
 })
@@ -1388,9 +1669,9 @@ test('/tree close closes the pane and /tree opens it again, booting nothing the 
   expect(sounds).toEqual(['play sounds/boot.wav'])
 })
 
-test('a session swap is silent: what the new session already holds sounds nothing', async ($, on) => {
+test('a session swap is silent: what the new session already holds sounds nothing and is not notified', async ($, on) => {
   const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' }
-  const { clock, sounds } = await session($, on, [], world)
+  const { clock, sounds, notified } = await session($, on, [], world)
   await clock.advance(500)
   // the session in place after a /resume stands at its red mark already
   world.id = 's2'
@@ -1398,6 +1679,7 @@ test('a session swap is silent: what the new session already holds sounds nothin
   await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
   await clock.advance(4000)
   expect(sounds).toEqual(['play sounds/boot.wav'])
+  expect(notified).toEqual([])
 })
 
 test('with Motion off nothing moves: an agent at work shows a still sign', { options: { animate: false } }, async ($, on) => {

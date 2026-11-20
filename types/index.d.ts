@@ -234,8 +234,8 @@ export type TreeChoices = {
   runModels?: Record<string, string>
 }
 
-/** What the pane shows: the tree, the help, the options page, or the sounds page under it (plan 09). */
-export type TreeView = 'tree' | 'help' | 'options' | 'sounds'
+/** What the pane shows: the tree, the help, the options page, or the sounds page (plan 09) or the notifications page (plan 12) under it. */
+export type TreeView = 'tree' | 'help' | 'options' | 'sounds' | 'notices'
 
 /** The languages the pane speaks: English, Hungarian and 21 more the user asked for. */
 export type Lang =
@@ -284,6 +284,12 @@ export type TreeUi = {
   openRuns?: string[]
   /** The workflow runs pressed closed while `showFinished` would show them: a run row's press wins over `f`. */
   closedRuns?: string[]
+  /**
+   * The whole tree a page at a time (plan 13): the first of its rows shown,
+   * set by pressing `+ n more` and by the paging row's `▲` and `▼`; none, the
+   * rows that matter most. Not stored; a session swap starts without it.
+   */
+  treeAt?: number
 }
 
 /**
@@ -301,6 +307,13 @@ export type TreeLook = { theme: 'dark' | 'light' | 'ansi'; reduced: boolean; loc
  */
 export type TreeStart = { opened?: boolean; poweredUp?: boolean }
 
+/**
+ * What came of the mod's last notification (plan 14): sent through Claude
+ * Code's channel (which), sent as a Windows notification where it has none,
+ * or not shown (why). The notifications page shows it; empty before any.
+ */
+export type TreeNotice = { at?: number; kind?: 'sent' | 'windows' | 'not'; channel?: string; reason?: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'forge-agent-tree': {
@@ -311,6 +324,7 @@ declare module 'claude-code' {
       pane: number
       look: Shaped<TreeLook>
       start: Shaped<TreeStart>
+      notice: Shaped<TreeNotice>
     }
   }
 }

@@ -1,6 +1,6 @@
 // The pane as data: rows of styled segments sized to the pane's columns and
 // chosen to fit its rows. No engine access, so every width is tested alone.
-import type { Lang, LogEntry, PickerId, TreeAgent, TreeChoices, TreeRun, TreeState, TreeUi, TreeView } from '../types'
+import type { Lang, LogEntry, PickerId, TreeAgent, TreeChoices, TreeNotice, TreeRun, TreeState, TreeUi, TreeView } from '../types'
 import {
   FAMILY_COLOR,
   NAME_COLORS,
@@ -42,6 +42,8 @@ import { LANGS, wordsFor } from './words'
 import type { OptionField, Words } from './words'
 import { SOUND_EVENTS, SOUND_OPTION } from './sounds'
 import type { SoundEvent } from './sounds'
+import { NOTICE_EVENTS, NOTICE_OPTION } from './notices'
+import type { NoticeEvent } from './notices'
 import { RADAR, skin } from './hud'
 
 export type Seg = {
@@ -139,6 +141,12 @@ export type Press =
   | { kind: 'sounds' }
   /** Plays an event's sound now, to hear it (the sounds page's `►`). */
   | { kind: 'testSound'; event: SoundEvent }
+  /** Opens the notifications page from the options page, or goes back from it. */
+  | { kind: 'notices' }
+  /** Sends an event's notification now, to see it (the notifications page's `►`). */
+  | { kind: 'testNotice'; event: NoticeEvent }
+  /** The whole tree a page at a time from this row (`+ n more`, `▲`, `▼`); none goes back to the rows that matter most (`×`). */
+  | { kind: 'treeAt'; at?: number }
 
 export type KeyButton = { key: string; hotkey: string; label: string; press: Press }
 export type KeyItem = { text: string } | KeyButton
@@ -186,6 +194,8 @@ export type LayoutOptions = {
   radar?: boolean
   /** The mod's own version, from its manifest: the help shows it. */
   version?: string
+  /** What came of the last notification (plan 14): the notifications page shows it under its heading. */
+  lastNotice?: TreeNotice
 }
 
 export type Look = 'hud' | 'classic'
@@ -224,14 +234,21 @@ export const DEFAULT_SETTINGS: Settings['values'] = {
   soundTurn: true,
   soundAlert: true,
   soundBoot: true,
+  // The notifications (plan 12; the user's defaults of 2026-11-20): on together, every event on.
+  notify: true,
+  notifyWaiting: true,
+  notifyFailed: true,
+  notifyRun: true,
+  notifyTurn: true,
+  notifyAlert: true,
   autoUpdate: true,
 }
 
-/** The options page's rows, in this order: the sounds page's row after `sound`, the language last. */
-export const OPTION_ORDER: readonly OptionField[] = ['openOnStart', 'animate', 'hud', 'columns', 'logRows', 'limitWarnAt', 'limitAlertAt', 'bandLine', 'sound', 'autoUpdate']
+/** The options page's rows, in this order: the sounds page's row after `sound`, the notifications page's after `notify`, the language last. */
+export const OPTION_ORDER: readonly OptionField[] = ['openOnStart', 'animate', 'hud', 'columns', 'logRows', 'limitWarnAt', 'limitAlertAt', 'bandLine', 'sound', 'notify', 'autoUpdate']
 
-/** Every option of the mod: the options page's and the sounds page's. */
-export const OPTION_FIELDS: readonly OptionField[] = [...OPTION_ORDER, ...SOUND_EVENTS.map(e => SOUND_OPTION[e])]
+/** Every option of the mod: the options page's, the sounds page's and the notifications page's. */
+export const OPTION_FIELDS: readonly OptionField[] = [...OPTION_ORDER, ...SOUND_EVENTS.map(e => SOUND_OPTION[e]), ...NOTICE_EVENTS.map(e => NOTICE_OPTION[e])]
 
 export const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const
 /** The mod's repository, shown in the help view. */
@@ -1242,6 +1259,12 @@ export function runOpen(ui: TreeUi, id: string): boolean {
 }
 
 function treeRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutOptions, detail: Detail, w: Words, limit?: number): Row[] {
+  // The light runs on the lines idle too, whenever motion is on (the user's request of 2026-11-19).
+  return trunk(treeList(s, ui, mode, cols, o, detail, w, limit), o.animate ? o.frame : undefined)
+}
+
+/** The tree's rows, its lines not yet in the trunk's color nor lit. */
+function treeList(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutOptions, detail: Detail, w: Words, limit?: number): Row[] {
   // The HUD's radar where nothing has to give way; a shorter pane gets the words alone.
   if (s.agents.length === 0 && (s.runs ?? []).length === 0)
     return [...mainRows(s, mode, cols, o, false, detail, w), ...introRows(mode, cols, w, o.radar === true && detail === 0 && mode !== 'narrow')]
@@ -1295,10 +1318,36 @@ function treeRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutO
   if (summary > 0) {
     const label = more > 0 ? w.more(summary) : w.finished(summary)
     const right: Part[] = more > 0 || mode === 'narrow' ? [] : [{ text: w.show, dim: true }]
-    rows.push({ kind: 'press', key: 'finished', press: { kind: 'finished' }, segs: fit([{ text: '└─ ', dim: true }, { text: label, dim: true }], right, cols, true) })
+    const segs = fit([{ text: '└─ ', dim: true }, { text: label, dim: true }], right, cols, true)
+    // `+ n more` opens the whole tree a page at a time (plan 13); `+ n finished` shows the finished agents, as `f` does.
+    rows.push(more > 0 ? { kind: 'press', key: 'more', press: { kind: 'treeAt', at: 0 }, segs } : { kind: 'press', key: 'finished', press: { kind: 'finished' }, segs })
   }
-  // The light runs on the lines idle too, whenever motion is on (the user's request of 2026-11-19).
-  return trunk(rows, o.animate ? o.frame : undefined)
+  return rows
+}
+
+/**
+ * The whole tree a page at a time (plan 13, the user's decisions of
+ * 2026-11-20), where `+ n more` was pressed: its full list in the tree's
+ * order, a row a node (its most compact view), as many as the tree's room
+ * holds, and under them a row to page through it: `▲  ▼  9–16 / 34  ×`. A page
+ * is the rows shown less one, so the last row of one is the first of the
+ * next. `▲` or `▼` with nowhere to go is dim and does nothing; `×` goes back
+ * to the rows that matter most. The lines keep their place in the tree, and
+ * their light runs within the window.
+ */
+function pagedTree(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutOptions, w: Words, room: number): Row[] {
+  const all = treeList(s, ui, mode, cols, o, 3, w)
+  const size = Math.max(1, room - 1)
+  const at = Math.min(Math.max(0, ui.treeAt ?? 0), Math.max(0, all.length - size))
+  const shown = all.slice(at, at + size)
+  const step = Math.max(1, size - 1)
+  const up = at > 0 ? Math.max(0, at - step) : undefined
+  const down = at + size < all.length ? Math.min(all.length - size, at + step) : undefined
+  const arrow = (sign: string, to: number | undefined, key: string): Part =>
+    to === undefined ? { text: sign, dim: true } : { text: sign, color: TITLE_COLOR, press: { kind: 'treeAt', at: to }, key }
+  const left: Part[] = [arrow('▲', up, 'tree:up'), { text: '  ' }, arrow('▼', down, 'tree:down'), { text: '  ' }, { text: `${at + 1}–${at + shown.length} / ${all.length}` }]
+  const close: Part[] = [{ text: '×', color: TITLE_COLOR, press: { kind: 'treeAt' }, key: 'tree:close' }]
+  return [...trunk(shown, o.animate ? o.frame : undefined), text(fit(left, close, cols, true))]
 }
 
 /**
@@ -1456,7 +1505,7 @@ function logRows(s: TreeState, mode: Mode, cols: number, n: number, w: Words): R
 
 function keysRow(mode: Mode, cols: number, view: TreeView, w: Words): Row {
   const k = w.keys
-  const options: KeyButton = { key: 'key-options', hotkey: 'o', label: view === 'options' || view === 'sounds' ? k.back : k.options, press: { kind: 'options' } }
+  const options: KeyButton = { key: 'key-options', hotkey: 'o', label: view === 'options' || view === 'sounds' || view === 'notices' ? k.back : k.options, press: { kind: 'options' } }
   const help: KeyButton = { key: 'key-help', hotkey: 'h', label: view === 'help' ? k.back : k.help, press: { kind: 'help' } }
   const buttons: KeyButton[] =
     view === 'tree'
@@ -1612,18 +1661,15 @@ function optionsRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, w: Word
   const v = o.settings?.values ?? DEFAULT_SETTINGS
   const locked = new Set(o.settings?.locked ?? [])
   const t = w.options
-  const lines: Array<{ row: Row; about?: true }> = []
+  // `master`: the switch for all the sounds or all the notifications, which its own page holds too.
+  const lines: Array<{ row: Row; about?: true; master?: true }> = []
   for (const field of OPTION_ORDER) {
-    lines.push({ row: text(fit([{ text: t.labels[field], flex: true }], optionValue(field, v[field], v, locked.has(field), w), cols, true)) })
+    const value = text(fit([{ text: t.labels[field], flex: true }], optionValue(field, v[field], v, locked.has(field), w), cols, true))
+    lines.push(field === 'sound' || field === 'notify' ? { row: value, master: true } : { row: value })
     if (mode !== 'narrow') lines.push({ row: text(fit([{ text: `  ${t.about[field]}`, dim: true, flex: true }], [], cols)), about: true })
-    // The sounds page (plan 09): how many events sound, and `▸` to open it.
-    if (field === 'sound') {
-      const on = SOUND_EVENTS.filter(e => v[SOUND_OPTION[e]] !== false).length
-      const press: Press = { kind: 'sounds' }
-      const open: Part[] = [{ text: `${on}/${SOUND_EVENTS.length} ` }, { text: '▸', color: TITLE_COLOR }]
-      // The whole row opens it.
-      lines.push({ row: { kind: 'press', key: 'sounds', press, segs: fit([{ text: w.sounds.open, flex: true }], open, cols, true) } })
-    }
+    // The sounds page (plan 09) and the notifications page (plan 12): how many events are on, and `▸` to open it.
+    if (field === 'sound') lines.push({ row: pageRow('sounds', w.sounds.open, SOUND_EVENTS.filter(e => v[SOUND_OPTION[e]] !== false).length, SOUND_EVENTS.length, cols) })
+    if (field === 'notify') lines.push({ row: pageRow('notices', w.notices.open, NOTICE_EVENTS.filter(e => v[NOTICE_OPTION[e]] !== false).length, NOTICE_EVENTS.length, cols) })
   }
   const press: Press = { kind: 'picker', id: 'lang' }
   const name = LANGS.find(l => l.code === w.lang)?.name ?? w.lang
@@ -1641,34 +1687,80 @@ function optionsRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, w: Word
   const total = (): number => head.length + body.length + note.length + 1
   if (o.rows !== undefined && total() > o.rows) body = lines.filter(l => !l.about)
   if (o.rows !== undefined && total() > o.rows) note = []
+  // Still too tall: the switches for all the sounds and all the notifications go, as their pages hold them too.
+  if (o.rows !== undefined && total() > o.rows) body = body.filter(l => !l.master)
   return [...head, ...body.map(l => l.row), ...note, keysRow(mode, cols, 'options', w)]
 }
 
+/** The options page's row to a page of events: its name, how many of them are on, `▸`; the whole row opens it. */
+function pageRow(page: 'sounds' | 'notices', name: string, on: number, all: number, cols: number): Row {
+  const press: Press = page === 'sounds' ? { kind: 'sounds' } : { kind: 'notices' }
+  return { kind: 'press', key: page, press, segs: fit([{ text: name, flex: true }], [{ text: `${on}/${all} ` }, { text: '▸', color: TITLE_COLOR }], cols, true) }
+}
+
 /**
- * The sounds page (plan 09, the user's request of 2026-11-19), under the
- * options page: the switch for them all first, then each event's sound with
- * `►` to hear it now and its own switch, a line about it under it (normal and
- * wide views). In a short pane the lines about them go first, then the note.
+ * A page of events under the options page, the sounds' (plan 09) or the
+ * notifications' (plan 12): the switch for them all first, then each event
+ * with `►` to try it now and its own switch, a line about it under it (normal
+ * and wide views). In a short pane the lines about them go first, then the note.
  */
-function soundsRows(mode: Mode, cols: number, w: Words, o: LayoutOptions): Row[] {
+function eventRows(
+  view: 'sounds' | 'notices',
+  rows: ReadonlyArray<{ field: OptionField; test?: Press; key?: string }>,
+  title: string,
+  noteText: string,
+  mode: Mode,
+  cols: number,
+  w: Words,
+  o: LayoutOptions,
+  status?: Row,
+): Row[] {
   const v = o.settings?.values ?? DEFAULT_SETTINGS
   const locked = new Set(o.settings?.locked ?? [])
   const t = w.options
   const lines: Array<{ row: Row; about?: true }> = []
-  const add = (field: OptionField, test?: SoundEvent): void => {
-    const play: Part[] = test ? [{ text: '►', color: TITLE_COLOR, press: { kind: 'testSound', event: test }, key: `test:${test}` }, { text: '  ' }] : []
-    lines.push({ row: text(fit([{ text: t.labels[field], flex: true }], [...play, ...optionValue(field, v[field], v, locked.has(field), w)], cols, true)) })
+  for (const { field, test, key } of rows) {
+    const tryIt: Part[] = test ? [{ text: '►', color: TITLE_COLOR, press: test, key }, { text: '  ' }] : []
+    lines.push({ row: text(fit([{ text: t.labels[field], flex: true }], [...tryIt, ...optionValue(field, v[field], v, locked.has(field), w)], cols, true)) })
     if (mode !== 'narrow') lines.push({ row: text(fit([{ text: `  ${t.about[field]}`, dim: true, flex: true }], [], cols)), about: true })
   }
-  add('sound')
-  for (const e of SOUND_EVENTS) add(SOUND_OPTION[e], e)
-  const head: Row[] = [titleRow(cols), text(fit([{ text: w.sounds.title, bold: true, part: 'heading' }], [], cols)), sep(cols)]
+  // A line under the heading (the notifications' last outcome) gives way after the lines about the events.
+  let under: Row[] = status ? [status] : []
+  const head = (): Row[] => [titleRow(cols), text(fit([{ text: title, bold: true, part: 'heading' }], [], cols)), ...under, sep(cols)]
   let body = lines
-  let note: Row[] = [sep(cols, { close: true }), text(fit([{ text: w.sounds.note, dim: true, flex: true }], [], cols))]
-  const total = (): number => head.length + body.length + note.length + 1
+  let note: Row[] = [sep(cols, { close: true }), text(fit([{ text: noteText, dim: true, flex: true }], [], cols))]
+  const total = (): number => head().length + body.length + note.length + 1
   if (o.rows !== undefined && total() > o.rows) body = lines.filter(l => !l.about)
+  if (o.rows !== undefined && total() > o.rows) under = []
   if (o.rows !== undefined && total() > o.rows) note = []
-  return [...head, ...body.map(l => l.row), ...note, keysRow(mode, cols, 'sounds', w)]
+  return [...head(), ...body.map(l => l.row), ...note, keysRow(mode, cols, view, w)]
+}
+
+/** The sounds page (plan 09, the user's request of 2026-11-19): `►` plays the event's sound now. */
+function soundsRows(mode: Mode, cols: number, w: Words, o: LayoutOptions): Row[] {
+  const rows = [{ field: 'sound' as const }, ...SOUND_EVENTS.map(e => ({ field: SOUND_OPTION[e], test: { kind: 'testSound', event: e } as Press, key: `test:${e}` }))]
+  return eventRows('sounds', rows, w.sounds.title, w.sounds.note, mode, cols, w, o)
+}
+
+/** The notifications page (plan 12, the user's decisions of 2026-11-20), as the sounds page: `►` sends the event's notification now. */
+function noticesRows(mode: Mode, cols: number, w: Words, o: LayoutOptions): Row[] {
+  const rows = [{ field: 'notify' as const }, ...NOTICE_EVENTS.map(e => ({ field: NOTICE_OPTION[e], test: { kind: 'testNotice', event: e } as Press, key: `notice:${e}` }))]
+  const last = o.lastNotice
+  return eventRows('notices', rows, w.notices.title, w.notices.note, mode, cols, w, o, last?.at !== undefined ? noticeStatus(last, last.at, cols, w) : undefined)
+}
+
+/**
+ * What came of the last notification, under the notifications page's heading
+ * (plan 14): `last: ✓ sent as a Windows notification  15:35`, `last: ✗ no
+ * notification was shown (no-channel)`; the sign green or red, the time in
+ * the times' color.
+ */
+function noticeStatus(last: TreeNotice, at: number, cols: number, w: Words): Row {
+  const n = w.notices
+  const shown = last.kind === 'sent' || last.kind === 'windows'
+  const said = last.kind === 'sent' ? n.lastSent(last.channel ?? '') : last.kind === 'windows' ? n.viaWindows : `${n.notShown} (${last.reason ?? '?'})`
+  const left: Part[] = [{ text: `${w.lastCall.trim()} `, dim: true }, shown ? { text: '✓', color: 'success' } : { text: '✗', color: 'error' }, { text: ' ' }, { text: said, flex: true }]
+  return text(fit(left, [{ text: ` ${clock(at)}`, color: TIME_COLOR }], cols))
 }
 
 function glance(s: TreeState, cols: number, o: LayoutOptions, w: Words): Row {
@@ -2037,6 +2129,7 @@ function classic(s: TreeState, ui: TreeUi, o: LayoutOptions, cols: number, w: Wo
   if (ui.view === 'help') return helpRows(mode, cols, w, o.look, o.version)
   if (ui.view === 'options') return optionsRows(s, ui, mode, cols, w, o)
   if (ui.view === 'sounds') return soundsRows(mode, cols, w, o)
+  if (ui.view === 'notices') return noticesRows(mode, cols, w, o)
   let foot = 2 // a separator and the keys, or the message panel
   // Bars shimmer whenever motion is on, idle too; the trunk's pulse only while things work (treeRows).
   const fullHead = header(s, mode, cols, o.now, o.animate ? o.frame : undefined, w, o.limits)
@@ -2077,7 +2170,8 @@ function classic(s: TreeState, ui: TreeUi, o: LayoutOptions, cols: number, w: Wo
       if (tree.length > room) tree = treeRows(s, ui, mode, cols, o, 1, w)
       if (tree.length > room) tree = treeRows(s, ui, mode, cols, o, 2, w)
       if (tree.length > room) tree = treeRows(s, ui, mode, cols, o, 3, w)
-      if (tree.length > room) tree = treeRows(s, ui, mode, cols, o, 3, w, room)
+      // Still too tall: the whole tree a page at a time where `+ n more` was pressed (plan 13), else the rows that matter most and `+ n more`.
+      if (tree.length > room) tree = ui.treeAt !== undefined ? pagedTree(s, ui, mode, cols, o, w, room) : treeRows(s, ui, mode, cols, o, 3, w, room)
     }
   }
   const out: Row[] = [...head, ...panel, ...(tree.length > 0 ? [sep(cols, { info: 'agents' }), ...tree] : [])]

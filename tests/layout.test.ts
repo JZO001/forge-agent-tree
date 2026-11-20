@@ -6,7 +6,7 @@ import { LANGS, wordsFor } from '../hooks/words'
 import type { LayoutOptions, Row, Settings } from '../hooks/layout'
 import { EFFECT_MS, RADAR, effectsEnd, squadCells } from '../hooks/hud'
 import { emptyTree, runLaunched, runNoticed, spawned, turnCompleted } from '../hooks/model'
-import type { PickerId, TreeState, TreeUi } from '../types'
+import type { PickerId, TreeAgent, TreeNotice, TreeState, TreeUi } from '../types'
 import { NOW, busyTree, workflowTree } from './fixture'
 
 const UI: TreeUi = { showFinished: false, showLog: true, view: 'tree' }
@@ -1560,6 +1560,13 @@ describe('the options page (plan 06)', () => {
     expect(lines.find(l => l.startsWith('Sound '))).toMatch(/^Sound +on$/)
     expect(lines.find(l => l.startsWith('Sound events'))).toMatch(/^Sound events +6\/8 ▸$/)
     expect(lines.some(l => l.startsWith('Advisor'))).toBe(false)
+    // the notifications: one switch for them all here, each on the notifications page (plan 12); all on by default (the user's decision of 2026-11-20)
+    expect(lines.find(l => l.startsWith('Notifications'))).toMatch(/^Notifications +on$/)
+    expect(lines).toContain('  every notification; each on the notifications page')
+    expect(lines.find(l => l.startsWith('Notification events'))).toMatch(/^Notification events +5\/5 ▸$/)
+    // after the sounds, before the update
+    const at = (start: string) => lines.findIndex(l => l.startsWith(start))
+    expect(at('Sound events') < at('Notifications') && at('Notification events') < at('Auto-update')).toBe(true)
     expect(lines.find(l => l.startsWith('Auto-update'))).toMatch(/^Auto-update +on$/)
     expect(lines).toContain('  daily, from GitHub; marketplace installs only')
     // the language by its own name, not its code (the user's request)
@@ -1573,6 +1580,11 @@ describe('the options page (plan 06)', () => {
     const rows = page()
     const press = (label: string, text: string) => segsOf(rowOf(rows, label)).find(x => x.text === text)?.press
     expect(press('Sound ', 'on')).toEqual({ kind: 'option', field: 'sound', value: false })
+    expect(press('Notifications', 'on')).toEqual({ kind: 'option', field: 'notify', value: false })
+    // the whole row opens the page
+    const events = rowOf(rows, 'Notification events')
+    expect(events?.kind === 'press' && events.press).toEqual({ kind: 'notices' })
+    expect(events?.kind === 'press' && events.key).toBe('notices')
     expect(press('Auto-update', 'on')).toEqual({ kind: 'option', field: 'autoUpdate', value: false })
     expect(press('Motion', 'on')).toEqual({ kind: 'option', field: 'animate', value: false })
     expect(press('Width', '−')).toEqual({ kind: 'option', field: 'columns', value: 52 })
@@ -1601,6 +1613,13 @@ describe('the options page (plan 06)', () => {
     expect(short.some(l => l.startsWith('  open the pane'))).toBe(false)
     expect(short.some(l => l.startsWith('Sound events'))).toBe(true)
     expect(short.at(-1)).toBe('o: back  h: help')
+    // still too tall: the switches for all the sounds and all the notifications go, their pages hold them too
+    expect(short.some(l => /^Sound +on$/.test(l) || /^Notifications +on$/.test(l))).toBe(false)
+    expect(short.some(l => l.startsWith('Notification events'))).toBe(true)
+    // where there is room for them, they stay
+    const taller = page(OPTIONS, 56, 24).map(lineOf)
+    expect(taller.some(l => /^Sound +on$/.test(l)) && taller.some(l => /^Notifications +on$/.test(l))).toBe(true)
+    expect(taller.some(l => l.startsWith('  open the pane'))).toBe(false)
   })
 
   test('it fits every width in every language, the language panel closed and open', () => {
@@ -1661,11 +1680,11 @@ describe('the Forge HUD (plan 08)', () => {
     }
   }
 
-  test('the pages fit too: help, options, sounds, the empty pane, in every language and every theme', () => {
+  test('the pages fit too: help, options, sounds, notifications, the empty pane, in every language and every theme', () => {
     for (const cols of [36, 56, 78]) {
       for (const ui of ALL_LANGS) {
         for (const theme of ['dark', 'light'] as const) {
-          for (const view of ['help', 'options', 'sounds'] as const) {
+          for (const view of ['help', 'options', 'sounds', 'notices'] as const) {
             for (const row of hud({ ...ui, view }, cols, undefined, busyTree(), theme)) expect(rowWidth(row) <= cols, `${ui.lang} ${view} ${cols}: ${lineOf(row)}`).toBe(true)
           }
           for (const row of hud(ui, cols, undefined, emptyTree(NOW), theme)) expect(rowWidth(row) <= cols, lineOf(row)).toBe(true)
@@ -1935,6 +1954,268 @@ describe('the sounds page (plan 09)', () => {
     const short = page(SOUNDS, 56, 16).map(lineOf)
     expect(short.some(l => l.startsWith('  uplink'))).toBe(false)
     expect(short.some(l => l.startsWith('Power-up'))).toBe(true)
+  })
+})
+
+// ── the notifications page (plan 12) ────────────────────────────────────
+
+describe('the notifications page (plan 12)', () => {
+  const NOTICES: TreeUi = { ...UI, view: 'notices' }
+  const page = (ui: TreeUi = NOTICES, cols = 56, rows?: number, settings?: Settings) =>
+    layout(busyTree(), ui, { cols, rows, now: NOW, frame: 0, animate: false, ...(settings ? { settings } : {}) })
+  const lineAt = (ui: TreeUi, start: string, settings?: Settings) => page(ui, 56, undefined, settings).map(lineOf).find(l => l.startsWith(start))
+
+  test('the switch for them all first, then each event: its name, ► to send it now, its switch, a line about it', () => {
+    const lines = page().map(lineOf)
+    expect(lines[1]).toBe('Notifications')
+    expect(lines[3]).toMatch(/^Notifications +on$/)
+    expect(lines[4]).toBe('  every notification; each on the notifications page')
+    // every event on by default (the user's decision of 2026-11-20), in this order
+    const names = ['Agent waiting', 'Failure', 'Workflow done', 'Turn complete', 'Red alert']
+    for (const name of names) expect(lines.find(l => l.startsWith(name)), name).toMatch(new RegExp(`^${name} +► +on$`))
+    const where = names.map(n => lines.findIndex(l => l.startsWith(n)))
+    expect(where).toEqual([...where].sort((a, b) => a - b))
+    expect(lines).toContain('  when an agent waits for you')
+    expect(lines).toContain('  when the main answer is done')
+    expect(lines.at(-2)).toBe('► sends a test now')
+    expect(lines.at(-1)).toBe('o: back  h: help')
+    const rows = page()
+    const send = rows.flatMap(r => (r.kind === 'keys' ? [] : r.segs)).find(x => x.key === 'notice:turn')
+    expect(send?.press).toEqual({ kind: 'testNotice', event: 'turn' })
+    const turn = rows.find(r => lineOf(r).startsWith('Turn complete'))!
+    expect(turn.kind !== 'keys' && turn.segs.find(x => x.text === 'on')?.press).toEqual({ kind: 'option', field: 'notifyTurn', value: false })
+    // a switch off shows off, and the options page counts it
+    const off: Settings = { values: { ...DEFAULT_SETTINGS, notifyTurn: false } }
+    expect(lineAt(NOTICES, 'Turn complete', off)).toMatch(/^Turn complete +► +off$/)
+    expect(lineAt({ ...UI, view: 'options' }, 'Notification events', off)).toMatch(/^Notification events +4\/5 ▸$/)
+  })
+
+  test('in Hungarian', () => {
+    const lines = page({ ...NOTICES, lang: 'hu' }).map(lineOf)
+    expect(lines[1]).toBe('Értesítések')
+    expect(lines.find(l => l.startsWith('Agent vár'))).toMatch(/^Agent vár +► +be$/)
+    expect(lines.at(-2)).toBe('► most küld egy próbát')
+  })
+
+  test('it fits every width in every language; a short pane drops the lines about them, then the note', () => {
+    for (const cols of [36, 44, 56, 72, 120]) {
+      for (const l of LANGS) {
+        for (const rows of [undefined, 24, 16, 12]) {
+          const drawn = page({ ...NOTICES, lang: l.code }, cols, rows)
+          for (const row of drawn) expect(rowWidth(row) <= cols, `${l.code} ${cols}: ${lineOf(row)}`).toBe(true)
+          if (rows !== undefined) expect(drawn.length <= rows, `${l.code} ${cols}×${rows}`).toBe(true)
+        }
+      }
+    }
+    const short = page(NOTICES, 56, 16).map(lineOf)
+    expect(short.some(l => l.startsWith('  when an agent'))).toBe(false)
+    expect(short.some(l => l.startsWith('Red alert'))).toBe(true)
+  })
+
+  test('the last notification’s outcome under the heading (plan 14): its sign, what came of it, its time', () => {
+    const at = NOW - 60_000
+    const time = new Date(at).toTimeString().slice(0, 5)
+    const segsOf = (row: Row | undefined) => (row && row.kind !== 'keys' && row.kind !== 'input' ? row.segs : [])
+    const draw = (lastNotice?: TreeNotice, ui: TreeUi = NOTICES, cols = 56, rows?: number) =>
+      layout(busyTree(), ui, { cols, rows, now: NOW, frame: 0, animate: false, ...(lastNotice ? { lastNotice } : {}) })
+    // none yet: no line
+    expect(draw().map(lineOf)[2]).toBe('─'.repeat(56))
+    const windows = draw({ at, kind: 'windows' })
+    expect(lineOf(windows[2]!)).toMatch(new RegExp(`^last: ✓ sent as a Windows notification +${time}$`))
+    expect(segsOf(windows[2]).find(x => x.text === '✓')?.color).toBe('success')
+    expect(segsOf(windows[2]).find(x => x.text.includes(time))?.color).toBe(TIME_COLOR)
+    expect(lineOf(draw({ at, kind: 'sent', channel: 'client' })[2]!)).toMatch(/^last: ✓ sent \(client\) +\d\d:\d\d$/)
+    const not = draw({ at, kind: 'not', reason: 'no-channel' })
+    expect(lineOf(not[2]!)).toMatch(/^last: ✗ no notification was shown \(no-channel\) +\d\d:\d\d$/)
+    expect(segsOf(not[2]).find(x => x.text === '✗')?.color).toBe('error')
+    expect(lineOf(draw({ at, kind: 'windows' }, { ...NOTICES, lang: 'hu' })[2]!)).toMatch(/^utolsó: ✓ Windows-értesítésként elküldve +\d\d:\d\d$/)
+    // every width, every language, short panes: it fits, and gives way after the lines about the events
+    for (const cols of [36, 44, 56, 72, 120]) {
+      for (const l of LANGS) {
+        for (const rows of [undefined, 24, 16, 12, 11]) {
+          const drawn = draw({ at, kind: 'not', reason: 'no-channel' }, { ...NOTICES, lang: l.code }, cols, rows)
+          for (const row of drawn) expect(rowWidth(row) <= cols, `${l.code} ${cols}: ${lineOf(row)}`).toBe(true)
+          if (rows !== undefined) expect(drawn.length <= rows, `${l.code} ${cols}×${rows}`).toBe(true)
+        }
+      }
+    }
+    const short = (rows: number) => draw({ at, kind: 'windows' }, NOTICES, 56, rows).map(lineOf)
+    expect(short(16).some(l => l.startsWith('last:')) && !short(16).some(l => l.startsWith('  when'))).toBe(true)
+    expect(short(12).some(l => l.startsWith('last:'))).toBe(false)
+    expect(short(12).some(l => l.startsWith('Red alert'))).toBe(true)
+  })
+
+  test('an option a policy locks shows its value with no button; ► still sends it', () => {
+    const rows = page(NOTICES, 56, undefined, { values: DEFAULT_SETTINGS, locked: ['notifyFailed'] })
+    const failure = rows.find(r => lineOf(r).startsWith('Failure'))!
+    expect(failure.kind !== 'keys' && failure.segs.filter(x => x.press !== undefined).map(x => x.press)).toEqual([{ kind: 'testNotice', event: 'failed' }])
+  })
+})
+
+// ── the whole tree a page at a time (plan 13) ───────────────────────────
+
+describe('the whole tree a page at a time (plan 13)', () => {
+  /** The busy tree with 26 more agents, every fifth done: far more than a short pane holds. */
+  const extras = (): TreeAgent[] =>
+    Array.from({ length: 26 }, (_, i) => ({
+      id: `x${i}`,
+      description: `Extra agent ${i}`,
+      type: 'Explore',
+      state: i % 5 === 0 ? ('done' as const) : ('running' as const),
+      since: NOW,
+      startedAt: NOW - 1000 * i,
+      ...(i % 5 === 0 ? { endedAt: NOW } : {}),
+      tools: 0,
+      model: 'claude-haiku-5-5',
+      effort: 'low',
+    }))
+  const crowd = (): TreeState => {
+    const s = busyTree()
+    return { ...s, agents: [...s.agents, ...extras()] }
+  }
+  const draw = (treeAt: number | undefined, rows = 24, cols = 56, ui: TreeUi = UI, s = crowd(), look?: 'hud') =>
+    layout(s, { ...ui, ...(treeAt !== undefined ? { treeAt } : {}) }, { cols, rows, now: NOW, frame: 0, animate: false, ...(look ? { look, theme: 'dark' as const } : {}) })
+  const segsOf = (row: Row | undefined) => (row && row.kind !== 'keys' && row.kind !== 'input' ? row.segs : [])
+  const pager = (rows: Row[]) => rows.find(r => segsOf(r).some(x => x.key === 'tree:close'))
+  const segOf = (row: Row | undefined, key: string) => segsOf(row).find(x => x.key === key)
+  /** Whom the tree's rows show, in order: `main`, an agent's id, a run's, the `+ n finished` row. */
+  const who = (rows: Row[]) =>
+    rows.flatMap(r => {
+      if (r.kind === 'keys' || r.kind === 'input') return []
+      if (r.role === 'main') return ['main']
+      if (r.agent) return [r.agent]
+      if (r.kind === 'press' && r.run) return [`run:${r.run}`]
+      if (r.kind === 'press' && r.key === 'finished') return ['finished']
+      return []
+    })
+
+  test('pressing `+ n more` opens it; until then the rows that matter most stay', () => {
+    const plain = draw(undefined)
+    const more = plain.find(r => r.kind === 'press' && r.key === 'more')
+    expect(more?.kind === 'press' && more.press).toEqual({ kind: 'treeAt', at: 0 })
+    expect(lineOf(more!)).toMatch(/^└─ \+ \d+ more/)
+    expect(pager(plain)).toBeUndefined()
+    // `+ n finished` still shows the finished agents, as `f` does
+    const tall = draw(undefined, 1000)
+    const finished = tall.find(r => r.kind === 'press' && r.key === 'finished')
+    expect(finished?.kind === 'press' && finished.press).toEqual({ kind: 'finished' })
+  })
+
+  test('a page is a slice of the whole list in the tree’s order, a row a node; pages overlap by one row; ▲ and ▼ dim at the ends', () => {
+    const order = who(draw(undefined, 1000))
+    const first = draw(0)
+    const shown = who(first)
+    const size = shown.length
+    expect(size > 2 && size < order.length).toBe(true)
+    expect(shown).toEqual(order.slice(0, size))
+    // a row a node: nothing but the nodes' own rows between the separator and the paging row
+    const sep = first.findIndex(r => lineOf(r) === '─'.repeat(56))
+    expect(first.indexOf(pager(first)!) - sep - 1).toBe(size)
+    expect(lineOf(pager(first)!)).toMatch(new RegExp(`^▲  ▼  1–${size} / ${order.length} +×$`))
+    expect(segOf(pager(first), 'tree:up')).toBeUndefined()
+    expect(segsOf(pager(first)).find(x => x.text === '▲')?.dim).toBe(true)
+    expect(segOf(pager(first), 'tree:down')?.press).toEqual({ kind: 'treeAt', at: size - 1 })
+    // the next page starts with the last row of this one
+    const second = draw(size - 1)
+    expect(who(second)).toEqual(order.slice(size - 1, 2 * size - 1))
+    expect(who(second)[0]).toBe(shown.at(-1))
+    expect(segOf(pager(second), 'tree:up')?.press).toEqual({ kind: 'treeAt', at: 0 })
+    // the last page, however far one asks: ▼ dim
+    const last = draw(999)
+    expect(who(last)).toEqual(order.slice(order.length - size))
+    expect(segOf(pager(last), 'tree:down')).toBeUndefined()
+    expect(lineOf(pager(last)!)).toMatch(new RegExp(`^▲  ▼  ${order.length - size + 1}–${order.length} / ${order.length} +×$`))
+    // × goes back to the rows that matter most
+    expect(segOf(pager(first), 'tree:close')?.press).toEqual({ kind: 'treeAt' })
+  })
+
+  test('the lines keep their place in the tree: a run’s agents hang under it in the window too', () => {
+    const wf = workflowTree()
+    const s: TreeState = { ...wf, agents: [...wf.agents, ...extras()] }
+    const guide = (r: Row) => lineOf(r).match(/^[ │├└─]*/)![0]
+    const nodes = (rows: Row[]) => rows.filter(r => r.kind !== 'keys' && r.kind !== 'input' && (r.agent !== undefined || (r.kind === 'press' && r.run !== undefined)))
+    const idOf = (r: Row) => (r.kind !== 'keys' && r.kind !== 'input' ? (r.agent ?? r.run ?? '') : '')
+    const whole = new Map(nodes(draw(undefined, 1000, 56, UI, s)).map(r => [idOf(r), guide(r)]))
+    let members = 0
+    for (const treeAt of [0, 4, 8, 12, 16, 999]) {
+      for (const r of nodes(draw(treeAt, 20, 56, UI, s))) {
+        expect(guide(r), lineOf(r)).toBe(whole.get(idOf(r)))
+        if (guide(r).startsWith('│  ')) members += 1
+      }
+    }
+    // the run's agents were among them
+    expect(members > 0).toBe(true)
+  })
+
+  test('it goes back by itself where the whole tree fits; a panel narrows the window, and with no room left the paging row goes too', () => {
+    expect(pager(draw(0, 1000))).toBeUndefined()
+    expect(pager(draw(5, 60))).toBeUndefined()
+    expect(who(draw(5, 60))).toEqual(who(draw(undefined, 1000)))
+    // a choice panel open: a smaller window, the pane's rows kept
+    const panel = draw(0, 30, 56, { ...UI, picker: 'effort' })
+    expect(panel.length <= 30).toBe(true)
+    expect(pager(panel)).toBeDefined()
+    expect(who(panel).length < who(draw(0, 30)).length).toBe(true)
+    // a smaller window still where the panel leaves little room; none at all, no window and no paging row
+    expect(who(draw(0, 12, 56, { ...UI, picker: 'model' }))).toHaveLength(2)
+    expect(pager(draw(0, 12, 56, { ...UI, picker: 'model' }))).toBeDefined()
+    const none = draw(0, 10, 56, { ...UI, picker: 'model' })
+    expect(who(none)).toEqual([])
+    expect(pager(none)).toBeUndefined()
+  })
+
+  test('every width, every language, classic and HUD: the window and its paging row fit the pane', { timeoutMs: 30_000 }, () => {
+    for (const cols of [36, 44, 56, 72, 120]) {
+      for (const l of LANGS) {
+        for (const look of [undefined, 'hud'] as const) {
+          for (const rows of [12, 16, 24]) {
+            for (const treeAt of [0, 5, 999]) {
+              const which = `${l.code} ${cols}×${rows} ${look ?? 'classic'} @${treeAt}`
+              const drawn = draw(treeAt, rows, cols, { ...UI, lang: l.code }, crowd(), look)
+              for (const row of drawn) expect(rowWidth(row) <= cols, `${which}: ${lineOf(row)}`).toBe(true)
+              expect(drawn.length <= rows, which).toBe(true)
+              // where the tree shows, its paging row does
+              if (who(drawn).length > 0) expect(pager(drawn), which).toBeDefined()
+            }
+          }
+        }
+      }
+    }
+  })
+
+  test('with a choice panel or the message panel open, and in motion: every row fits, the window shrinks', { timeoutMs: 30_000 }, () => {
+    for (const cols of [36, 56, 120]) {
+      for (const lang of ['en', 'hu', 'ja', 'de'] as const) {
+        for (const extra of [{ picker: 'model' as const }, { picker: 'lang' as const }, { picker: 'agentEffort' as const }, { compose: 'a1' }]) {
+          for (const rows of [16, 24, 30]) {
+            for (const look of [undefined, 'hud'] as const) {
+              const which = `${lang} ${cols}×${rows} ${look ?? 'classic'} ${JSON.stringify(extra)}`
+              const drawn = draw(0, rows, cols, { ...UI, lang, ...extra }, crowd(), look)
+              for (const row of drawn) expect(rowWidth(row) <= cols, `${which}: ${lineOf(row)}`).toBe(true)
+              expect(drawn.length <= rows, which).toBe(true)
+              if (who(drawn).length > 0) expect(pager(drawn), which).toBeDefined()
+            }
+          }
+        }
+      }
+    }
+    // in motion, the HUD's comet and the classic pulse within the window: every frame keeps every row's width
+    for (const look of [undefined, 'hud'] as const) {
+      for (let frame = 0; frame < 24; frame++) {
+        const drawn = layout(crowd(), { ...UI, treeAt: 6 }, { cols: 56, rows: 24, now: NOW, frame, animate: true, ...(look ? { look, theme: 'dark' as const } : {}) })
+        for (const row of drawn) expect(rowWidth(row) <= 56, `${look ?? 'classic'} frame ${frame}: ${lineOf(row)}`).toBe(true)
+        expect(drawn.length <= 24).toBe(true)
+        expect(pager(drawn)).toBeDefined()
+      }
+    }
+  })
+
+  test('in the HUD the window stands between the rails, its trunk heavy', () => {
+    const lines = draw(6, 24, 56, UI, crowd(), 'hud').map(lineOf)
+    const rail = lines.findIndex(l => /^┌┄+ \d+ running/.test(l))
+    const paging = lines.findIndex(l => /^▲  ▼  \d+–\d+ \/ \d+ +×$/.test(l))
+    expect(rail >= 0 && paging > rail + 1).toBe(true)
+    for (const l of lines.slice(rail + 1, paging)) expect(l, l).toMatch(/^┣━ /)
   })
 })
 

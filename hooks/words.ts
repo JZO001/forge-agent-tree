@@ -171,6 +171,26 @@ export type Words = {
   }
   /** The sounds page (plan 09): its title, the options page's row that opens it, the note under it. */
   sounds: { title: string; open: string; note: string }
+  /**
+   * The notifications page (plan 12): its title, the options page's row that
+   * opens it, the note under it; the word a test notification carries. What
+   * came of one (plan 14), for a test's toast and the page's last line: sent
+   * through Claude Code's channel (`sent` the toast, `lastSent` the line),
+   * sent as a Windows notification, or not shown, and the two reasons told
+   * in words (no channel in this terminal; turned off in Claude Code).
+   */
+  notices: {
+    title: string
+    open: string
+    note: string
+    test: string
+    sent: (channel: string) => string
+    lastSent: (channel: string) => string
+    viaWindows: string
+    notShown: string
+    noChannel: string
+    offInClaude: string
+  }
   /** The Forge HUD's own words (plan 08): the rails' labels and the status lamp's, drawn in capitals. */
   hud: { core: string; limits: string; crew: string; nominal: string; caution: string; critical: string }
   messageLog: string
@@ -214,6 +234,12 @@ export type OptionField =
   | 'soundTurn'
   | 'soundAlert'
   | 'soundBoot'
+  | 'notify'
+  | 'notifyWaiting'
+  | 'notifyFailed'
+  | 'notifyRun'
+  | 'notifyTurn'
+  | 'notifyAlert'
   | 'autoUpdate'
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
@@ -324,10 +350,11 @@ const EN: Words = {
     title: 'Options',
     note: 'Saved in Claude Code\'s settings (/config), every session',
     language: 'Language',
-    labels: { openOnStart: 'Open on start', animate: 'Motion', columns: 'Width', logRows: 'Log rows', limitWarnAt: 'Limits: yellow from', limitAlertAt: 'Limits: red from', bandLine: 'Line above the prompt', advisorSound: 'Advisor call', autoUpdate: 'Auto-update', hud: 'Forge HUD', sound: 'Sound', soundSpawn: 'Agent deployed', soundDone: 'Agent done', soundFailed: 'Agent failed', soundWaiting: 'Agent waiting', soundTurn: 'Turn complete', soundAlert: 'Red alert', soundBoot: 'Power-up' },
-    about: { openOnStart: 'open the pane when an interactive session starts', animate: 'the spinner, the bars\' light, the pulse on the tree', columns: 'the docked pane\'s columns, from its next opening', logRows: '0 hides the log', limitWarnAt: 'a limit bar turns yellow from this share', limitAlertAt: 'and red from this one', bandLine: 'while the pane is closed', advisorSound: 'uplink chirp at each advisor call', autoUpdate: 'daily, from GitHub; marketplace installs only', hud: 'the sci-fi look; off: the classic one', sound: 'every sound of the pane; each one on the sounds page', soundSpawn: 'rising bloop when a subagent starts', soundDone: 'two rising chimes when one finishes', soundFailed: 'falling tones when one fails', soundWaiting: 'sonar ping when one waits for you', soundTurn: 'bell arpeggio when the main answer is done', soundAlert: 'klaxon at 90% context or a red limit', soundBoot: 'when the pane first opens' },
+    labels: { openOnStart: 'Open on start', animate: 'Motion', columns: 'Width', logRows: 'Log rows', limitWarnAt: 'Limits: yellow from', limitAlertAt: 'Limits: red from', bandLine: 'Line above the prompt', advisorSound: 'Advisor call', autoUpdate: 'Auto-update', hud: 'Forge HUD', sound: 'Sound', soundSpawn: 'Agent deployed', soundDone: 'Agent done', soundFailed: 'Agent failed', soundWaiting: 'Agent waiting', soundTurn: 'Turn complete', soundAlert: 'Red alert', soundBoot: 'Power-up', notify: 'Notifications', notifyWaiting: 'Agent waiting', notifyFailed: 'Failure', notifyRun: 'Workflow done', notifyTurn: 'Turn complete', notifyAlert: 'Red alert' },
+    about: { openOnStart: 'open the pane when an interactive session starts', animate: 'the spinner, the bars\' light, the pulse on the tree', columns: 'the docked pane\'s columns, from its next opening', logRows: '0 hides the log', limitWarnAt: 'a limit bar turns yellow from this share', limitAlertAt: 'and red from this one', bandLine: 'while the pane is closed', advisorSound: 'uplink chirp at each advisor call', autoUpdate: 'daily, from GitHub; marketplace installs only', hud: 'the sci-fi look; off: the classic one', sound: 'every sound of the pane; each one on the sounds page', soundSpawn: 'rising bloop when a subagent starts', soundDone: 'two rising chimes when one finishes', soundFailed: 'falling tones when one fails', soundWaiting: 'sonar ping when one waits for you', soundTurn: 'bell arpeggio when the main answer is done', soundAlert: 'klaxon at 90% context or a red limit', soundBoot: 'when the pane first opens', notify: 'every notification; each on the notifications page', notifyWaiting: 'when an agent waits for you', notifyFailed: 'when an agent or a workflow run fails', notifyRun: 'when a workflow run finishes well', notifyTurn: 'when the main answer is done', notifyAlert: 'at 90% context or a red limit' },
   },
   sounds: { title: 'Sounds', open: 'Sound events', note: '► plays it now' },
+  notices: { title: 'Notifications', open: 'Notification events', note: '► sends a test now', test: 'test', sent: channel => `${NAME}: test notification sent (${channel})`, lastSent: channel => `sent (${channel})`, viaWindows: 'sent as a Windows notification', notShown: 'no notification was shown', noChannel: 'Claude Code has no notification channel in this terminal', offInClaude: 'notifications are off in Claude Code' },
   hud: { core: 'core', limits: 'limits', crew: 'crew', nominal: 'nominal', caution: 'caution', critical: 'critical' },
   messageLog: 'message sent',
   messageFailed: reason => `${NAME}: the message was not delivered: ${reason}`,
@@ -455,10 +482,11 @@ const HU: Words = {
     title: 'Beállítások',
     note: 'A Claude Code beállításai közé kerül (/config), minden sessionre',
     language: 'Nyelv',
-    labels: { openOnStart: 'Megnyitás induláskor', animate: 'Mozgás', columns: 'Szélesség', logRows: 'Naplósorok', limitWarnAt: 'Limit: sárga ettől', limitAlertAt: 'Limit: piros ettől', bandLine: 'Sor a prompt fölött', advisorSound: 'Advisor-hívás', autoUpdate: 'Automatikus frissítés', hud: 'Forge HUD', sound: 'Hang', soundSpawn: 'Új agent', soundDone: 'Agent kész', soundFailed: 'Agent hiba', soundWaiting: 'Agent vár', soundTurn: 'Kör vége', soundAlert: 'Vörös riasztás', soundBoot: 'Indulás' },
-    about: { openOnStart: 'interaktív session indulásakor megnyílik a panel', animate: 'a pörgő jel, a sávok fénye, a fa fénye', columns: 'a dokkolt panel szélessége, a következő megnyitástól', logRows: '0 elrejti a naplót', limitWarnAt: 'ettől a résztől sárga a limit sávja', limitAlertAt: 'ettől pedig piros', bandLine: 'amíg a panel zárva van', advisorSound: 'uplink-csippanás minden advisor-hívásnál', autoUpdate: 'naponta, a GitHubról; csak telepített példányon', hud: 'a sci-fi megjelenés; ki: a klasszikus', sound: 'a panel minden hangja; egyenként a hangok oldalán', soundSpawn: 'emelkedő hang, amikor egy subagent indul', soundDone: 'két emelkedő csengés, amikor egy végez', soundFailed: 'ereszkedő hangok, amikor egy hibával áll le', soundWaiting: 'szonárcsippanás, amikor egy téged vár', soundTurn: 'harangjáték, amikor a main válasza kész', soundAlert: 'sziréna 90% kontextusnál vagy piros limitnél', soundBoot: 'a panel első megnyitásakor' },
+    labels: { openOnStart: 'Megnyitás induláskor', animate: 'Mozgás', columns: 'Szélesség', logRows: 'Naplósorok', limitWarnAt: 'Limit: sárga ettől', limitAlertAt: 'Limit: piros ettől', bandLine: 'Sor a prompt fölött', advisorSound: 'Advisor-hívás', autoUpdate: 'Automatikus frissítés', hud: 'Forge HUD', sound: 'Hang', soundSpawn: 'Új agent', soundDone: 'Agent kész', soundFailed: 'Agent hiba', soundWaiting: 'Agent vár', soundTurn: 'Kör vége', soundAlert: 'Vörös riasztás', soundBoot: 'Indulás', notify: 'Értesítések', notifyWaiting: 'Agent vár', notifyFailed: 'Hiba', notifyRun: 'Workflow kész', notifyTurn: 'Kör vége', notifyAlert: 'Vörös riasztás' },
+    about: { openOnStart: 'interaktív session indulásakor megnyílik a panel', animate: 'a pörgő jel, a sávok fénye, a fa fénye', columns: 'a dokkolt panel szélessége, a következő megnyitástól', logRows: '0 elrejti a naplót', limitWarnAt: 'ettől a résztől sárga a limit sávja', limitAlertAt: 'ettől pedig piros', bandLine: 'amíg a panel zárva van', advisorSound: 'uplink-csippanás minden advisor-hívásnál', autoUpdate: 'naponta, a GitHubról; csak telepített példányon', hud: 'a sci-fi megjelenés; ki: a klasszikus', sound: 'a panel minden hangja; egyenként a hangok oldalán', soundSpawn: 'emelkedő hang, amikor egy subagent indul', soundDone: 'két emelkedő csengés, amikor egy végez', soundFailed: 'ereszkedő hangok, amikor egy hibával áll le', soundWaiting: 'szonárcsippanás, amikor egy téged vár', soundTurn: 'harangjáték, amikor a main válasza kész', soundAlert: 'sziréna 90% kontextusnál vagy piros limitnél', soundBoot: 'a panel első megnyitásakor', notify: 'minden értesítés; egyenként az értesítések oldalán', notifyWaiting: 'ha egy agent rád vár', notifyFailed: 'ha egy agent vagy workflow-futás hibázik', notifyRun: 'ha egy workflow-futás jól végződik', notifyTurn: 'ha elkészült a main válasza', notifyAlert: '90% kontextusnál vagy piros limitnél' },
   },
   sounds: { title: 'Hangok', open: 'Hangesemények', note: '► most lejátssza' },
+  notices: { title: 'Értesítések', open: 'Értesítés-események', note: '► most küld egy próbát', test: 'próba', sent: channel => `${NAME}: próbaértesítés elküldve (${channel})`, lastSent: channel => `elküldve (${channel})`, viaWindows: 'Windows-értesítésként elküldve', notShown: 'nem jelent meg értesítés', noChannel: 'a Claude Code-nak nincs értesítési csatornája ebben a terminálban', offInClaude: 'az értesítések ki vannak kapcsolva a Claude Code-ban' },
   hud: { core: 'mag', limits: 'limitek', crew: 'legénység', nominal: 'rendben', caution: 'figyelem', critical: 'kritikus' },
   messageLog: 'üzenet elküldve',
   messageFailed: reason => `${NAME}: az üzenet nem érkezett meg: ${reason}`,

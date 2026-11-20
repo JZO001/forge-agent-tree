@@ -14,20 +14,27 @@
 // Its sounds (sounds.ts, plan 09) play in an interactive session with the Sound
 // option on, and when ► on the sounds page is pressed to hear one: macOS
 // through $.audio.play, Windows through PowerShell, Linux through paplay or aplay.
+// Its notifications (notices.ts, plan 12) go through the person's own channel
+// ($.ui.notify) in an interactive session with the Notifications option on, and
+// when ► on the notifications page is pressed to see one; where Claude Code has
+// no channel in the terminal, on Windows as a Windows notification through
+// PowerShell (plan 14).
 //
 // The one thing it does on its own is its update (update.ts, plan 07): with
 // the Auto-update option on, once a day at an interactive start, a copy
 // installed from a marketplace reads its version on GitHub and, when it is
 // newer, runs `claude plugin update`.
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, EngineInterface, Register, TextProps, Timer } from 'claude-code'
+import type { AgentInfo, EngineInterface, NotifyOptions, Register, TextProps, Timer } from 'claude-code'
 
-import type { Lang, TreeLimit, TreeLook, TreeStart, TreeState, TreeUi } from '../types'
+import type { Lang, TreeLimit, TreeLook, TreeNotice, TreeStart, TreeState, TreeUi } from '../types'
 import { EFFORT_LEVELS, LIMIT_THRESHOLDS, TITLE_TEXT, effortLevel, modelEffort } from './format'
 import type { LimitThresholds } from './format'
 import { ADVISOR_OFFER, BAND_GAP, DEFAULT_SETTINGS, OPTION_FIELDS, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen, themeKind } from './layout'
 import type { Press, Row, Seg, Settings, ThemeKind } from './layout'
-import { SOUND_BEEPS, SOUND_OPTION, heardOf, nextSound, soundEvents, soundFile } from './sounds'
+import { SOUND_BEEPS, SOUND_OPTION, heardChanges, heardOf, nextSound, soundEventsOf, soundFile } from './sounds'
+import { NOTICE_DELAY_MS, NOTICE_OPTION, nextNotices, noticeText, noticesOf, testSaid, toastScript } from './notices'
+import type { Notice, NoticeEvent, NoticeQueue } from './notices'
 import { BOOT_MS, EFFECT_MS, effectsEnd } from './hud'
 import type { Heard, SoundEvent, SoundQueue } from './sounds'
 import {
@@ -117,6 +124,7 @@ const frameRef = { plugin: 'forge-agent-tree', key: 'frame' } as const
 const paneRef = { plugin: 'forge-agent-tree', key: 'pane' } as const
 const lookRef = { plugin: 'forge-agent-tree', key: 'look' } as const
 const startRef = { plugin: 'forge-agent-tree', key: 'start' } as const
+const noticeRef = { plugin: 'forge-agent-tree', key: 'notice' } as const
 
 const tree = atom(treeRef, emptyTree(0), { shape: TREE_SHAPE })
 const uiState = atom(uiRef, { showFinished: false, showLog: true, view: 'tree' } as TreeUi, { shape: 'ui-3' })
@@ -127,6 +135,8 @@ const paneAtom = atom(paneRef, 0)
 const lookAtom = atom(lookRef, { theme: 'dark', reduced: false, locked: [] } as TreeLook, { shape: 'look-1' })
 /** What this process's start did: kept across a reload, carried over a session swap. */
 const startAtom = atom(startRef, {} as TreeStart, { shape: 'start-1' })
+/** What came of the last notification (plan 14): the notifications page shows it. */
+const noticeAtom = atom(noticeRef, {} as TreeNotice, { shape: 'notice-1' })
 
 /** The pane opened or closed: the line above the prompt looks again. */
 async function paneMoved($: EngineInterface): Promise<void> {
@@ -241,11 +251,15 @@ async function tick($: EngineInterface): Promise<void> {
   const idleShimmer = animate && shimmering
   // A sound waiting its turn plays as soon as its turn comes, not at the idle pace.
   const sounding = Object.keys(soundQueue).length > 0
-  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && !sounding && ticks % IDLE_TICKS !== 0) return
+  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && !sounding && !pageFits && ticks % IDLE_TICKS !== 0) return
   ticking = true
   try {
     const now = await $.clock.now()
     if (watching && now > watchSwapUntil) watchSwapUntil = 0
+    if (pageFits) {
+      pageFits = false
+      await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, treeAt: undefined })).catch(() => undefined)
+    }
     const due = pollSoon || (busy ? now - lastPoll >= POLL_BUSY_MS : ticks % IDLE_TICKS === 0)
     // Another session in place gets a tree of its own before anything else is drawn.
     if (watching || due) await adopt($, now)
@@ -332,9 +346,10 @@ async function adopt($: EngineInterface, now: number): Promise<void> {
     holding = false
     catchUp()
   }
-  // What the new session already holds sounds nothing; what the old one raised and did not play, neither.
+  // What the new session already holds sounds nothing and is not notified; what the old one raised and did not play or send, neither.
   heard = undefined
   soundQueue = {}
+  noticeQueue = {}
   watchSwapUntil = 0
   dirty = true
   // The new session's $.state is empty: what this process's start did goes along.
@@ -520,6 +535,10 @@ const lastSounds: Record<string, number> = {}
 let heard: Heard | undefined
 /** The sounds raised and waiting their turn (sounds.ts). */
 let soundQueue: SoundQueue = {}
+/** When each kind of notification last went out (notices.ts). */
+const lastNotices: Partial<Record<NoticeEvent, number>> = {}
+/** The notifications waiting their kind's gap, to go out merged (notices.ts). */
+let noticeQueue: NoticeQueue = {}
 /** Whether the session is interactive: a `claude -p` run sounds nothing (the review of 2026-11-20). */
 let interactive = false
 /** The power-up sounds once a process, at the pane's first opening; kept across a reload ($.state `start`). */
@@ -530,6 +549,12 @@ let startedOpen = false
 let bootAt: number | undefined
 /** When a panel last opened: the HUD unfolds it (F2). */
 let panelAt: number | undefined
+/**
+ * The pane's last drawing showed the whole tree while a page of it was asked
+ * for (plan 13): the ticker goes back to the rows that matter most, so a page
+ * shown later never hides a waiting or a failed agent.
+ */
+let pageFits = false
 
 /** What this process's start did, into the session's state: a reload reads it back, a session swap carries it over. */
 async function keepStart($: EngineInterface): Promise<void> {
@@ -540,6 +565,11 @@ async function keepStart($: EngineInterface): Promise<void> {
 /** Whether an event sounds: the Sound option on (on by default), and the event's own (on by default, but the advisor's call and a new agent's). */
 function soundOn(options: Options, event: SoundEvent): boolean {
   return flagOf(options, 'sound') && flagOf(options, SOUND_OPTION[event])
+}
+
+/** Whether an event is notified: the Notifications option on, and the event's own (all on by default, the user's decision of 2026-11-20). */
+function noticeOn(options: Options, event: NoticeEvent): boolean {
+  return flagOf(options, 'notify') && flagOf(options, NOTICE_OPTION[event])
 }
 
 /** A switch as set, else its default (the engine fills them in; the defaults stand where it did not). */
@@ -609,13 +639,63 @@ function listen($: EngineInterface, now: number): void {
   const before = heard
   heard = heardOf(mem, thresholds, now)
   if (!before || !interactive) return
-  const next = nextSound(soundQueue, soundEvents(before, mem, thresholds), e => soundOn(current, e), lastSounds, now)
+  // One hearing for both: what changed sounds, and is notified.
+  const changes = heardChanges(before, mem, thresholds)
+  const next = nextSound(soundQueue, soundEventsOf(changes), e => soundOn(current, e), lastSounds, now)
   soundQueue = next.queue
   const event = next.play
-  if (!event) return
-  lastSounds[event] = now
-  lastSounds.any = now
-  void playSound($, event).catch(() => undefined)
+  if (event) {
+    lastSounds[event] = now
+    lastSounds.any = now
+    void playSound($, event).catch(() => undefined)
+  }
+  const notices = nextNotices(noticeQueue, noticesOf(changes, mem, wordsFor(lang), thresholds), e => noticeOn(current, e), lastNotices, now)
+  noticeQueue = notices.queue
+  for (const n of notices.send) {
+    lastNotices[n.event] = now
+    sendNotice($, n)
+  }
+}
+
+/**
+ * Sends a notification through the person's own channel (plan 12), never
+ * awaited: a host (the desktop app, a remote client) holds it NOTICE_DELAY_MS
+ * and drops it if they come back first; a terminal sends it now. One key a
+ * kind, so a host's newer one replaces the older. One not sent says nothing
+ * (the notifications page shows it); a refusal rejects, and that is caught.
+ */
+function sendNotice($: EngineInterface, n: Notice): void {
+  void deliver($, noticeText(n, wordsFor(lang)), { title: TITLE, key: `forge:${n.event}`, delayMs: NOTICE_DELAY_MS, untilBack: true }, n.event).catch(() => undefined)
+}
+
+/**
+ * Delivers a notification and keeps what came of it for the notifications
+ * page (plan 14): through Claude Code's channel; where it has none in this
+ * terminal (`no-channel`: Windows Terminal is none of those its `auto`
+ * knows), on Windows as a Windows notification, one per `kind` in the
+ * notification center. Never where the person turned notifications off
+ * (`disabled`), a hook refused one, or chose the bell.
+ */
+async function deliver($: EngineInterface, text: string, options: NotifyOptions, kind: string): Promise<TreeNotice> {
+  const sent = await $.ui.notify(text, options).catch((err: unknown) => ({ isSent: false as const, reason: String(err) }))
+  let outcome: TreeNotice = sent.isSent ? { kind: 'sent', channel: sent.channel } : { kind: 'not', reason: sent.reason }
+  if (!sent.isSent && sent.reason === 'no-channel' && (await windowsToast($, text, kind))) outcome = { kind: 'windows' }
+  const at = await $.clock.now().catch(() => undefined)
+  await update($, noticeAtom, (): TreeNotice => ({ ...outcome, ...(at !== undefined ? { at } : {}) })).catch(() => undefined)
+  return outcome
+}
+
+/**
+ * A Windows notification through Windows PowerShell (plan 14): its WinRT
+ * toast, the script free of double quotes, as plain `-Command`. Whether
+ * Windows took it (it may still hold the banner back: do not disturb);
+ * elsewhere than on Windows, never.
+ */
+async function windowsToast($: EngineInterface, text: string, kind: string): Promise<boolean> {
+  if (!(await systemOf($)).startsWith('Windows')) return false
+  const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', toastScript(TITLE, text, kind)]
+  const ran = await $.process.run(argv, { timeoutMs: 15_000 }).catch(() => undefined)
+  return ran?.exitCode === 0
 }
 
 /** The HUD's boot sequence, from now: once a process, with the HUD on and motion on. */
@@ -766,6 +846,12 @@ function settingsOf(options: Options, locked: readonly string[] = lockedOptions)
       soundTurn: flag('soundTurn'),
       soundAlert: flag('soundAlert'),
       soundBoot: flag('soundBoot'),
+      notify: flag('notify'),
+      notifyWaiting: flag('notifyWaiting'),
+      notifyFailed: flag('notifyFailed'),
+      notifyRun: flag('notifyRun'),
+      notifyTurn: flag('notifyTurn'),
+      notifyAlert: flag('notifyAlert'),
       autoUpdate: flag('autoUpdate'),
     },
     locked: OPTION_FIELDS.filter(f => locked.includes(f)),
@@ -953,6 +1039,26 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
     case 'testSound': {
       // To hear it: it plays whatever the switches say.
       void playSound($, press.event).catch(() => undefined)
+      return
+    }
+    case 'notices': {
+      await readOptionLocks($).catch(() => undefined)
+      await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, view: u.view === 'notices' ? 'options' : 'notices', picker: undefined, pickerFor: undefined }))
+      return
+    }
+    case 'treeAt': {
+      // The whole tree a page at a time from this row (plan 13); none, back to the rows that matter most.
+      const at = press.at
+      await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, treeAt: at }))
+      return
+    }
+    case 'testNotice': {
+      // To see it: sent whatever the switches say, and now, with no delay: the person is right
+      // here, and a host would hold a delayed one and drop it (`untilBack`). What came of it
+      // shows in a toast, in words no one takes for the notification itself (plan 14).
+      const w = wordsFor(lang)
+      const outcome = await deliver($, noticeText({ event: press.event, items: [w.notices.test] }, w), { title: TITLE, key: `forge:test:${press.event}` }, 'test')
+      $.ui.toast(testSaid(outcome, w))
       return
     }
     case 'option': {
@@ -1588,6 +1694,7 @@ export const register: Register = (on, options: Options) => {
     const f = await read($, frameAtom)
     // The theme, reduced motion and the locks as last read: a reload's first drawing too, and a change draws again.
     const look = await read($, lookAtom)
+    const notice = await read($, noticeAtom)
     const now = await $.clock.now()
     const rows: Row[] = layout(s, ui, {
       cols: e.props.bodyColumns,
@@ -1603,10 +1710,15 @@ export const register: Register = (on, options: Options) => {
       look: options.hud !== false ? 'hud' : 'classic',
       theme: look.theme,
       ...(look.version ? { version: look.version } : {}),
+      ...(notice.at !== undefined ? { lastNotice: notice } : {}),
       ...(bootAt !== undefined ? { bootAt } : {}),
       ...(panelAt !== undefined ? { openedAt: panelAt } : {}),
     })
     shimmering = hasLiveCell(rows)
+    // The whole tree fits again (the pane grew, agents folded) while a page was asked
+    // for: the ticker forgets the page (plan 13), as a drawing may not write the state.
+    // Not while a panel takes the tree's room: the page comes back when it closes.
+    pageFits = ui.treeAt !== undefined && ui.view === 'tree' && !ui.picker && ui.compose === undefined && !rows.some(r => r.kind !== 'keys' && r.kind !== 'input' && r.segs.some(x => x.key === 'tree:close'))
     const act = (press: Press) => () => {
       void pressed($, press).catch(() => undefined)
     }

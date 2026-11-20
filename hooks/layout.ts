@@ -24,6 +24,7 @@ import {
   limitColor,
   modelColor,
   modelName,
+  padStartCells,
   percent,
   seconds,
   spark,
@@ -35,7 +36,7 @@ import {
   windowSize,
   width,
 } from './format'
-import { anyActive, isActive, isEnded, isMember, runEnded, runOf, runTally, stepModel, whoOf } from './model'
+import { anyActive, isActive, isEnded, isMember, runEnded, runFailed, runOf, runTally, stepModel, whoOf } from './model'
 import type { LimitThresholds } from './format'
 import { LANGS, wordsFor } from './words'
 import type { OptionField, Words } from './words'
@@ -64,6 +65,10 @@ export type Seg = {
   part?: SegPart
   /** A bar's share (0 to 1), on each of its parts: the HUD draws the bar as LED segments. */
   fill?: number
+  /** A bar's color on its unlit rest: an empty bar keeps its color in the HUD (the classic look draws the rest dim). */
+  hue?: string
+  /** A name inside the text (an agent's, in a panel's title) that keeps its case where the HUD writes the rest in capitals. */
+  keep?: string
 }
 
 /** The kinds of part the HUD skin draws its own way. */
@@ -102,7 +107,7 @@ export type Rail = { label?: 'core' | 'limits' | 'crew' | 'log'; info?: 'agents'
 export type RowTags = {
   role?: 'title' | 'rail' | 'main' | 'frame-top' | 'frame-side' | 'frame-bottom' | 'log' | 'about' | 'radar'
   rail?: Rail
-  /** A log row's time: the HUD types the newest one in. */
+  /** A log row's time as the pane learnt of it (`seen`, else when it happened): the HUD types a fresh one in. */
   at?: number
   /** The agent an agent's first row is: the HUD plays its events (it starts, ends, fails, waits). */
   agent?: string
@@ -149,7 +154,7 @@ export type Row =
    * measured and drawn as text where no field can be; `agentId` is whom it
    * writes to.
    */
-  | { kind: 'input'; key: string; agentId: string; value?: string; label: string; lines: number; room: number; segs: Seg[] }
+  | { kind: 'input'; key: string; agentId: string; value?: string; label: string; lines: number; room: number; placeholder: number; segs: Seg[] }
 
 export type Mode = 'narrow' | 'normal' | 'wide'
 
@@ -183,6 +188,16 @@ export type LayoutOptions = {
 
 export type Look = 'hud' | 'classic'
 export type ThemeKind = 'dark' | 'light' | 'ansi'
+
+/**
+ * Claude Code's theme setting as the HUD reads it: `light`, `light-daltonized`
+ * and `light-ansi` are light (the effects keep to named colors there, dark on
+ * a light ground), `dark-ansi` is ANSI, the rest dark.
+ */
+export function themeKind(name: unknown): ThemeKind {
+  const t = typeof name === 'string' ? name.toLowerCase() : ''
+  return t.startsWith('light') ? 'light' : t.includes('ansi') ? 'ansi' : 'dark'
+}
 
 /** The mod's options as in effect, and which of them a policy locks (shown with no buttons). */
 export type Settings = { values: Record<OptionField, boolean | number>; locked?: readonly OptionField[] }
@@ -279,6 +294,8 @@ function plain(p: Part): Seg {
   if (p.bg !== undefined) seg.bg = p.bg
   if (p.part !== undefined) seg.part = p.part
   if (p.fill !== undefined) seg.fill = p.fill
+  if (p.hue !== undefined) seg.hue = p.hue
+  if (p.keep !== undefined) seg.keep = p.keep
   return seg
 }
 
@@ -372,7 +389,7 @@ function barParts(fraction: number, cells: number, color: string | undefined, mo
   } else {
     parts.push({ text: '█'.repeat(full), color, ...tag })
   }
-  parts.push({ text: b.fill.slice(full), color, ...tag }, { text: b.rest, dim: true, ...tag, part: 'barRest' })
+  parts.push({ text: b.fill.slice(full), color, ...tag }, { text: b.rest, dim: true, ...tag, part: 'barRest', ...(color ? { hue: color } : {}) })
   return parts.filter(p => p.text.length > 0)
 }
 
@@ -498,9 +515,9 @@ function limitRows(s: TreeState, mode: Mode, cols: number, now: number, motion: 
         const long: Part = { text: at(resets, now, w.lang, true), color: TIME_COLOR }
         const short: Part = { text: at(resets, now, w.lang), color: TIME_COLOR }
         const dot: Part = { text: ' · ', dim: true }
+        // (As AGENTS.md says: no short day kept with the countdown; the review of 2026-11-20 found it tried before the full day alone.)
         right.push([{ text: w.resets, dim: true }, long, dot, left_])
         right.push([long, dot, left_])
-        right.push([short, dot, left_])
         right.push([long])
         right.push([short])
         right.push([left_])
@@ -750,10 +767,12 @@ function header(s: TreeState, mode: Mode, cols: number, now: number, motion: num
   const gauge = gaugeOf(s, mode, w)
   const ctx = contextRow(s, mode, cols, motion, w, gauge)
   if (ctx) rows.push({ row: text(ctx), stay: 7 })
+  const limits = limitRows(s, mode, cols, now, motion, w, gauge, thresholds)
   rows.push(
     ...advisorRows(s, mode, cols, now, w),
-    gapRow(0.2, 'limits'),
-    ...limitRows(s, mode, cols, now, motion, w, gauge, thresholds),
+    // The limits' gap only with limits to open: else, left alone in a short pane, the HUD named the team's rail LIMITS.
+    ...(limits.length > 0 ? [gapRow(0.2, 'limits')] : []),
+    ...limits,
     gapRow(0.1, 'crew'),
     { row: text(teamRow(s, mode, cols, w)), stay: 3 },
     agentsRow(s, mode, cols, w),
@@ -879,8 +898,8 @@ function ancestors(id: string, parents: ReadonlyMap<string, string | undefined>)
 }
 
 /** Which nodes matter most when not all fit: waiting, working, failed, the rest. */
-function rank(n: Node): number {
-  if (n.kind === 'run') return n.run.end === 'failed' ? 2 : runEnded(n.run) ? 4 : 1
+function rank(s: TreeState, n: Node): number {
+  if (n.kind === 'run') return runFailed(s, n.run) ? 2 : runEnded(n.run) ? 4 : 1
   switch (n.agent.state) {
     case 'waiting':
       return 0
@@ -1081,7 +1100,8 @@ function agentRows(a: TreeAgent, item: Item, mode: Mode, cols: number, o: Layout
   ]
   const clock: Part = { text: '', color: TIME_COLOR }
   const label = agentLabel(a, mode, c, w, member)
-  const right: Part[] = [{ text: ' '.repeat(Math.max(0, column - sum(label))) }, ...label, { ...clock, text: ` ${time.padStart(mode === 'narrow' ? 5 : 7)}` }]
+  // Padded by cells: in Japanese, Korean and Chinese a time's units are two cells wide, and the times stay in one column.
+  const right: Part[] = [{ text: ' '.repeat(Math.max(0, column - sum(label))) }, ...label, { ...clock, text: ` ${padStartCells(time, mode === 'narrow' ? 5 : 7)}` }]
   // An agent at work: its signs open its panels, the rest of its row its transcript.
   const press: Press = { kind: 'agent', id: a.id }
   const segs = fit(left, right, cols, true)
@@ -1102,9 +1122,10 @@ function agentRows(a: TreeAgent, item: Item, mode: Mode, cols: number, o: Layout
 
 function mainRows(s: TreeState, mode: Mode, cols: number, o: LayoutOptions, below: boolean, detail: Detail, w: Words): Row[] {
   const busy = s.main.isBusy
+  const color = modelColor(s.main.model)
   const right: Part[] = busy
-    ? [{ text: spin(o), color: modelColor(s.main.model) }, { text: ` ${duration(o.now - (s.main.turnStartedAt ?? o.now), w.lang)}`, color: TIME_COLOR }]
-    : [{ text: w.idle, dim: true }]
+    ? [{ text: spin(o), ...(color ? { color } : {}) }, { text: ` ${duration(o.now - (s.main.turnStartedAt ?? o.now), w.lang)}`, color: TIME_COLOR }]
+    : idleParts(w.idle, color)
   const left: Part[] = [{ text: 'main', bold: true, color: TRUNK_COLOR }]
   if (s.main.prompt) left.push({ text: mode === 'narrow' ? ' “' : '  “' }, { text: s.main.prompt, flex: true, part: 'prompt' }, { text: '”' })
   const rows: Row[] = [{ kind: 'press', key: 'main', press: { kind: 'main' }, segs: fit(left, right, cols, true), role: 'main' }]
@@ -1113,6 +1134,16 @@ function mainRows(s: TreeState, mode: Mode, cols: number, o: LayoutOptions, belo
     rows.push(text(fit([{ text: below ? '│  ' : '   ', dim: true }, { text: s.main.activity, dim: true, flex: true }], tools, cols)))
   }
   return rows
+}
+
+/**
+ * The main row idle: its `○` in the main model's color, as an idle agent's
+ * (no gray signs; the user's choice of 2026-11-20), the word after it dim.
+ * Every language writes it `○ <word>`.
+ */
+function idleParts(said: string, color: string | undefined): Part[] {
+  if (!said.startsWith('○')) return [{ text: said, dim: true }]
+  return [{ text: '○', ...(color ? { color } : {}) }, { text: said.slice(1), dim: true }]
 }
 
 function introRows(mode: Mode, cols: number, w: Words, radar = false): Row[] {
@@ -1134,7 +1165,7 @@ function latestFinished(s: TreeState): string | undefined {
     if ((a.state === 'done' || a.state === 'stopped') && !isMember(s, a) && (!best || (a.endedAt ?? 0) >= best.at)) best = { id: a.id, at: a.endedAt ?? 0 }
   }
   for (const r of s.runs ?? []) {
-    if (runEnded(r) && r.end !== 'failed' && (!best || (r.endedAt ?? 0) >= best.at)) best = { id: `run:${r.id}`, at: r.endedAt ?? 0 }
+    if (runEnded(r) && !runFailed(s, r) && (!best || (r.endedAt ?? 0) >= best.at)) best = { id: `run:${r.id}`, at: r.endedAt ?? 0 }
   }
   return best?.id
 }
@@ -1172,7 +1203,7 @@ function runCounts(s: TreeState, r: TreeRun, mode: Mode, o: LayoutOptions): Part
  */
 function runRows(r: TreeRun, item: Item, s: TreeState, mode: Mode, cols: number, o: LayoutOptions, detail: Detail, column: number, w: Words, nameColor?: string): Row[] {
   const ended = runEnded(r)
-  const failed = r.end === 'failed'
+  const failed = runFailed(s, r)
   // A node the tree branches from: in the trunk's color, as its lines (the user's request); red when the run failed.
   const sign: Part = failed ? { text: '▣', color: 'error' } : { text: '▣', color: TRUNK_COLOR }
   const time = duration((ended ? (r.endedAt ?? o.now) : o.now) - r.startedAt, w.lang)
@@ -1183,7 +1214,7 @@ function runRows(r: TreeRun, item: Item, s: TreeState, mode: Mode, cols: number,
     { text: r.name || 'workflow', flex: true, part: 'name', ...(nameColor ? { color: nameColor } : {}) },
   ]
   const counts = runCounts(s, r, mode, o)
-  const right: Part[] = [{ text: ' '.repeat(Math.max(0, column - sum(counts))) }, ...counts, { text: ` ${time.padStart(mode === 'narrow' ? 5 : 7)}`, color: TIME_COLOR }]
+  const right: Part[] = [{ text: ' '.repeat(Math.max(0, column - sum(counts))) }, ...counts, { text: ` ${padStartCells(time, mode === 'narrow' ? 5 : 7)}`, color: TIME_COLOR }]
   // When it started, beside its name, where the name keeps its whole length
   // with it (the user's request: two runs of one workflow told apart).
   const started: Part[] = [{ text: '  ' }, { text: at(r.startedAt, o.now, w.lang), color: TIME_COLOR }]
@@ -1219,7 +1250,7 @@ function treeRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutO
   // over `f`, the user's report of 2026-11-19); a run that ended well as one
   // finished node.
   const fold = (n: Node): Fold => {
-    if (n.kind === 'run') return ui.showFinished || !runEnded(n.run) || n.run.end === 'failed' || nodeId(n) === keep ? 'show' : 'count'
+    if (n.kind === 'run') return ui.showFinished || !runEnded(n.run) || runFailed(s, n.run) || nodeId(n) === keep ? 'show' : 'count'
     const a = n.agent
     if (a.state !== 'done' && a.state !== 'stopped') return 'show'
     const run = runOf(s, a.run)
@@ -1235,7 +1266,7 @@ function treeRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutO
     const room = Math.max(0, limit - 2)
     if (items.length > room) {
       const parents = parentsOf(kept, undefined, new Map())
-      const ranked = [...items].sort((x, y) => rank(x.node) - rank(y.node) || changed(y.node) - changed(x.node))
+      const ranked = [...items].sort((x, y) => rank(s, x.node) - rank(s, y.node) || changed(y.node) - changed(x.node))
       const chosen = new Set<string>()
       for (const item of ranked) {
         const id = nodeId(item.node)
@@ -1405,7 +1436,7 @@ function logRows(s: TreeState, mode: Mode, cols: number, n: number, w: Words): R
     const right = logRight(entry, w)
     if (mode === 'narrow') {
       const what = [entry.label, said, right].filter(Boolean).join(' · ')
-      return { kind: 'text', segs: fit([g, { text: ' ' }, { text: what, flex: true }], [{ text: clock(entry.at), color: TIME_COLOR }], cols), role: 'log', at: entry.at }
+      return { kind: 'text', segs: fit([g, { text: ' ' }, { text: what, flex: true }], [{ text: clock(entry.at), color: TIME_COLOR }], cols), role: 'log', at: entry.seen ?? entry.at }
     }
     const cells = mode === 'wide' ? 21 : 16
     const label = cut(entry.label, cells)
@@ -1417,7 +1448,7 @@ function logRows(s: TreeState, mode: Mode, cols: number, n: number, w: Words): R
       { text: `${label}${' '.repeat(Math.max(0, cells - width(label)))} ` },
       { text: said, dim: true, flex: true },
     ]
-    return { kind: 'text', segs: fit(left, right ? [{ text: right, color: TIME_COLOR }] : [], cols), role: 'log', at: entry.at }
+    return { kind: 'text', segs: fit(left, right ? [{ text: right, color: TIME_COLOR }] : [], cols), role: 'log', at: entry.seen ?? entry.at }
   })
 }
 
@@ -1652,7 +1683,8 @@ const OPTION_GAP = 3
 /** One option of a panel: its value, its name, and a short name where a pane is too short for the long ones. */
 export type Choice = { value: string; label: string; short?: string }
 
-type Picker = { title: string; choices: Choice[]; current: string | undefined; note?: string }
+/** A panel: its title (`keep`, a name in it that keeps its case in the HUD's capitals), its options, the one in use, a note. */
+type Picker = { title: string; keep?: string; choices: Choice[]; current: string | undefined; note?: string }
 
 function pickerOf(id: PickerId, s: TreeState, ui: TreeUi, w: Words): Picker {
   switch (id) {
@@ -1704,6 +1736,7 @@ function pickerOf(id: PickerId, s: TreeState, ui: TreeUi, w: Words): Picker {
     case 'runModel':
       return {
         title: w.runModelTitle(agentName(s, ui.pickerFor)),
+        keep: agentName(s, ui.pickerFor),
         choices: [{ value: 'auto', label: w.auto }, ...agentOffer(s).map(alias => ({ value: alias, label: modelChoiceLabel(alias, w) }))],
         current: (ui.pickerFor !== undefined ? s.choices?.runModels?.[ui.pickerFor] : undefined) ?? 'auto',
         note: w.runModelNote,
@@ -1734,7 +1767,7 @@ export function agentOffer(s: TreeState): string[] {
 export function panelRows(id: PickerId, s: TreeState, ui: TreeUi, cols: number, w: Words, withNote = true, short = false): Row[] {
   const p = pickerOf(id, s, ui, w)
   const choices = short ? p.choices.map(c => ({ ...c, label: c.short ?? c.label })) : p.choices
-  return frameRows(id, p.title, choices, p.current, cols, withNote ? p.note : undefined)
+  return frameRows(id, p.title, choices, p.current, cols, withNote ? p.note : undefined, p.keep !== undefined ? { keep: p.keep } : {})
 }
 
 /**
@@ -1748,12 +1781,12 @@ export function frameRows(
   current: string | undefined,
   cols: number,
   note?: string,
-  more: { lead?: Seg[]; after?: Row[]; foot?: string } = {},
+  more: { lead?: Seg[]; after?: Row[]; foot?: string; keep?: string } = {},
 ): Row[] {
   const inner = cols - 4
   const edge = (t: string): Seg => ({ text: t, color: PANEL_COLOR })
   const name = cut(title, Math.max(1, cols - 6))
-  const top: Seg[] = [edge('╭─ '), { text: name, color: PANEL_COLOR, bold: true, part: 'title' }, edge(` ${'─'.repeat(Math.max(0, cols - 5 - width(name)))}╮`)]
+  const top: Seg[] = [edge('╭─ '), { text: name, color: PANEL_COLOR, bold: true, part: 'title', ...(more.keep ? { keep: more.keep } : {}) }, edge(` ${'─'.repeat(Math.max(0, cols - 5 - width(name)))}╮`)]
   // A lead (the message panel's `effort:`) opens the first line.
   const lines: Seg[][] = [[...(more.lead ?? [])]]
   let used = sum(more.lead ?? [])
@@ -1796,6 +1829,27 @@ export function frameRows(
   return [{ kind: 'text', segs: top, role: 'frame-top' }, ...body, ...(more.after ?? []), { kind: 'text', segs: bottom, role: 'frame-bottom' }]
 }
 
+/**
+ * The hint Claude Code draws after a focused field (2.1.328, its `Input`):
+ * ` ⏎ ` and the submit label (none here), and for a field of two lines or more
+ * ` · shift+⏎ new line` (or ` · \⏎ new line`) too, wherever the room after the
+ * label less that still holds half the pane's columns. The longer form's two
+ * widths: with `shift+⏎`, and with `\⏎`.
+ */
+const FIELD_HINT = { short: 3, long: 22, longNarrow: 17 } as const
+
+/**
+ * How wide the message field's blank placeholder is: the room after its label
+ * less the hint the engine adds while the field has focus, and a cell for the
+ * cursor. A placeholder as wide as the whole room pushed the label and the hint
+ * onto two lines while the field was empty (the user's live check of
+ * 2026-11-20, status.jpg); a typed character made it right again.
+ */
+export function placeholderCells(cols: number, room: number, lines: number): number {
+  const long = lines > 1 && room - FIELD_HINT.longNarrow >= cols / 2
+  return Math.max(1, room - (long ? FIELD_HINT.long : FIELD_HINT.short) - 1)
+}
+
 /** The message field's key: what the pane draws it under, and what the focus is moved onto. */
 export function fieldKey(agentId: string): string {
   return `message:${agentId}`
@@ -1834,8 +1888,10 @@ export function composeRows(s: TreeState, ui: TreeUi, cols: number, w: Words, dr
     ...(draft ? { value: draft } : {}),
     label,
     lines,
-    // the cells after the label: the field's blank placeholder fills them, so a click anywhere on its lines reaches it
+    // the cells after the label
     room,
+    // the field's blank placeholder: as wide as it can be (a click anywhere on it reaches the field), short of the hint the engine adds while it has focus
+    placeholder: placeholderCells(cols, room, lines),
     segs: [{ text: lead }, { text: ' '.repeat(room) }],
   }
   // The field's further lines: drawn by the field, counted here so the pane's height adds up.
@@ -1864,8 +1920,8 @@ export const BAND_GAP = '  '
 const BAND_AGENTS = 16
 
 /** A workflow run's sign on the band line: one for all of its agents, in the color of how it stands. */
-function bandRunSign(r: TreeRun): { text: string; style: BandStyle } {
-  if (r.end === 'failed') return { text: '▣', style: { color: 'error' } }
+function bandRunSign(s: TreeState, r: TreeRun): { text: string; style: BandStyle } {
+  if (runFailed(s, r)) return { text: '▣', style: { color: 'error' } }
   return { text: '▣', style: runEnded(r) ? { dimColor: true } : {} }
 }
 
@@ -1922,7 +1978,7 @@ export function bandLine(s: TreeState, cols: number, o: { frame: number; animate
     if (!run) marks.push(bandSign(a))
     else if (!seen.has(run.id)) {
       seen.add(run.id)
-      marks.push(bandRunSign(run))
+      marks.push(bandRunSign(s, run))
     }
   }
   for (const sign of marks.slice(-BAND_AGENTS)) {

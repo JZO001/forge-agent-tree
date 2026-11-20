@@ -309,21 +309,125 @@ export function ago(ms: number, lang?: Lang): string {
 }
 
 const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
+/**
+ * Signs a terminal draws as a two-cell emoji by default (✅ ❌ ⚡ ⭐ ⌛ 🀄 🆕),
+ * as Claude Code's own measure counts them (Bun.stringWidth). The pane's own
+ * signs are none of these (✓ ✗ ✎ ▣ ◆ ● ‖ ■ ○ ◌ ⬢ ↯ ☇ ☀ ☁ ☂ ▾ ► ▸), checked
+ * in the mod's runtime (the review of 2026-11-20).
+ */
+const EMOJI = /\p{Emoji_Presentation}/u
+/** What may follow a joiner and still be drawn as one emoji with the sign before. */
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u
+/** Nothing but plain ASCII: one cell a character, the common case measured at once. */
+const ASCII = /^[\x20-\x7e]*$/
+
+function regional(code: number | undefined): boolean {
+  return code !== undefined && code >= 0x1f1e6 && code <= 0x1f1ff
+}
 
 function charWidth(ch: string): number {
   const code = ch.codePointAt(0) ?? 0
   if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0
-  if (code >= 0x300 && code <= 0x36f) return 0
-  // variation selectors (the text or emoji form of the sign before) take no cell
+  // combining marks: part of the sign before
+  if ((code >= 0x300 && code <= 0x36f) || (code >= 0x20d0 && code <= 0x20ff)) return 0
+  // Nothing below U+1100 is wide; box drawing, blocks and braille are not either (the pane's bars, frames and spinner).
+  if (code < 0x1100 || (code >= 0x2500 && code <= 0x25fc) || (code >= 0x2800 && code <= 0x28ff)) return 1
+  // variation selectors (the text or emoji form of the sign before) take no cell of their own
   if (code >= 0xfe00 && code <= 0xfe0f) return 0
-  return WIDE.test(ch) ? 2 : 1
+  // zero-width spaces and joiners
+  if ((code >= 0x200b && code <= 0x200d) || code === 0x2060 || code === 0xfeff) return 0
+  return WIDE.test(ch) || EMOJI.test(ch) ? 2 : 1
 }
 
-/** How many terminal cells a text takes. */
+/**
+ * A text's signs as the terminal draws them, each with what joins it: an
+ * emoji's form selector, a skin tone, a joiner and the emoji after it, the
+ * second half of a flag, a combining mark.
+ */
+export function clusters(text: string): string[] {
+  const out: string[] = []
+  let joiner = false
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const last = out[out.length - 1]
+    const attaches =
+      last !== undefined &&
+      ((joiner && PICTOGRAPHIC.test(ch)) ||
+        code === 0x200d ||
+        (code >= 0xfe00 && code <= 0xfe0f) ||
+        (code >= 0x1f3fb && code <= 0x1f3ff) ||
+        (code >= 0x300 && code <= 0x36f) ||
+        (code >= 0x20d0 && code <= 0x20ff) ||
+        (regional(code) && regional(last.codePointAt(0)) && [...last].length === 1))
+    joiner = code === 0x200d
+    if (attaches) out[out.length - 1] = last + ch
+    else out.push(ch)
+  }
+  return out
+}
+
+/** The cells one cluster takes: its first sign's, two for a sign shown in its emoji form (`⚠️`). */
+function clusterWidth(c: string): number {
+  const first = charWidth(String.fromCodePoint(c.codePointAt(0) ?? 0))
+  return first === 1 && c.includes('️') ? 2 : first
+}
+
+/**
+ * How many terminal cells a text takes, as Claude Code measures it: wide
+ * scripts and emoji two (the review of 2026-11-20: a ✅ counted as one made a
+ * row wider than the pane), a joined emoji or a flag as one sign. The same
+ * count as `clusters` and their widths, in one pass: it runs for every part of
+ * every row.
+ */
 export function width(text: string): number {
+  if (ASCII.test(text)) return text.length
   let w = 0
-  for (const ch of text) w += charWidth(ch)
+  // the cells the last sign took; a joiner came; the first half of a flag stands alone
+  let last = 0
+  let joiner = false
+  let half = false
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    if (code === 0xfe0f) {
+      // its emoji form: two cells
+      if (last === 1) {
+        w += 1
+        last = 2
+      }
+      continue
+    }
+    if (code === 0x200d) {
+      joiner = true
+      continue
+    }
+    if (joiner) {
+      joiner = false
+      if (code >= 0x80 && PICTOGRAPHIC.test(ch)) continue
+    }
+    if ((code >= 0x1f3fb && code <= 0x1f3ff) || (code >= 0xfe00 && code <= 0xfe0e)) continue
+    if (regional(code)) {
+      half = !half
+      if (!half) continue
+      w += 2
+      last = 2
+      continue
+    }
+    half = false
+    const cw = charWidth(ch)
+    w += cw
+    if (cw > 0) last = cw
+  }
   return w
+}
+
+/** A text padded on the left to `cells` cells, by cells, not characters: a time in Japanese is two cells a sign. */
+export function padStartCells(text: string, cells: number): string {
+  return ' '.repeat(Math.max(0, cells - width(text))) + text
+}
+
+/** A text padded on the right to `cells` cells, by cells. */
+export function padEndCells(text: string, cells: number): string {
+  return text + ' '.repeat(Math.max(0, cells - width(text)))
 }
 
 /** Cuts a text to `cells`, ending it with `…` when anything was left out. */
@@ -332,10 +436,10 @@ export function cut(text: string, cells: number): string {
   if (width(text) <= cells) return text
   let out = ''
   let w = 0
-  for (const ch of text) {
-    const cw = charWidth(ch)
+  for (const c of clusters(text)) {
+    const cw = clusterWidth(c)
     if (w + cw > cells - 1) break
-    out += ch
+    out += c
     w += cw
   }
   return `${out}…`

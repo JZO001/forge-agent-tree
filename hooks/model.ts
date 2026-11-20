@@ -44,16 +44,6 @@ export function emptyTree(now: number): TreeState {
   }
 }
 
-/** After `/clear`: a new conversation, the same models. */
-export function reset(s: TreeState, now: number): TreeState {
-  const fresh = emptyTree(now)
-  return {
-    ...fresh,
-    main: { ...fresh.main, model: s.main.model, effort: s.main.effort, contextWindow: s.main.contextWindow },
-    advisor: { ...fresh.advisor, model: s.advisor.model },
-  }
-}
-
 /**
  * After a session swap: nothing of another session is still at work here.
  * Agents the agent list does not show any more are stopped, the main turn idle.
@@ -205,6 +195,17 @@ export function runEnded(r: TreeRun): boolean {
   return r.end !== undefined || r.settled === true
 }
 
+/**
+ * A run that failed: its notification says so, or, taken as ended with none,
+ * one of its agents failed (the review of 2026-11-20: such a run sounded done,
+ * its `▣` stayed in the trunk color and it folded as one that ended well). The
+ * verdict is read, never stored: a late notification still says how it ended.
+ */
+export function runFailed(s: TreeState, r: TreeRun): boolean {
+  if (r.end !== undefined) return r.end === 'failed'
+  return r.settled === true && runTally(s, r).failed > 0
+}
+
 function patchRun(s: TreeState, id: string, change: (r: TreeRun) => TreeRun): TreeState {
   return { ...s, runs: (s.runs ?? []).map(r => (r.id === id ? change(r) : r)) }
 }
@@ -243,15 +244,20 @@ export type RunFacts = {
 
 /** A run starts: its first sight logs it. A resumed run (the same id, a new call) opens again. */
 function opened(s: TreeState, f: RunFacts, now: number): TreeState {
+  // One line each: a script's description may span several, and a row is one line (the review of 2026-11-20).
+  const name = f.name ? oneLine(f.name) || undefined : undefined
+  const about = f.about ? oneLine(f.about) || undefined : undefined
   const known = runOf(s, f.runId)
   if (known) {
     const again = runEnded(known)
     const next = patchRun(s, known.id, r => ({
       ...r,
-      name: f.name ?? r.name,
-      about: f.about ?? r.about,
+      name: name ?? r.name,
+      about: about ?? r.about,
       taskId: f.taskId ?? r.taskId,
       toolUseId: f.toolUseId ?? r.toolUseId,
+      // A run its agent's spawn opened first knew no caller: the tool's answer names it.
+      parentId: r.parentId ?? f.callerId,
       // A resumed run starts over: its time counts from this call.
       ...(again ? { end: undefined, settled: undefined, endedAt: undefined, startedAt: now } : {}),
     }))
@@ -261,8 +267,8 @@ function opened(s: TreeState, f: RunFacts, now: number): TreeState {
   }
   const run: TreeRun = {
     id: f.runId,
-    name: f.name,
-    about: f.about,
+    name,
+    about,
     taskId: f.taskId,
     toolUseId: f.toolUseId,
     parentId: f.callerId,
@@ -332,16 +338,17 @@ export function runNoticed(s: TreeState, n: RunNotice, now: number): TreeState {
   next = { ...next, agents: next.agents.map(a => (a.run === r.id && isActive(a) ? { ...a, state: 'stopped' as const, since: now, endedAt: now } : a)) }
   // Taken as ended before: logged then, not again.
   if (r.settled) return next
-  return withLog(next, runEndLog(next, runOf(next, r.id)!, end, endedAt))
+  return withLog(next, runEndLog(next, runOf(next, r.id)!, end, endedAt, now))
 }
 
-function runEndLog(s: TreeState, r: TreeRun, end: RunEnd, endedAt: number): LogEntry {
+/** A run's end in the log: at the time it ended, `seen` when the pane learnt of it (the notification lags). */
+function runEndLog(s: TreeState, r: TreeRun, end: RunEnd, endedAt: number, seen: number): LogEntry {
   const ms = Math.max(0, endedAt - r.startedAt)
   const label = runLabel(r)
-  if (end === 'failed') return { at: endedAt, kind: 'run', label, text: 'failed', say: { phrase: 'failed' }, right: duration(ms), ms }
-  if (end === 'killed') return { at: endedAt, kind: 'run', label, text: 'stopped', say: { phrase: 'stopped' }, right: duration(ms), ms }
+  if (end === 'failed') return { at: endedAt, seen, kind: 'run', label, text: 'failed', say: { phrase: 'failed' }, right: duration(ms), ms }
+  if (end === 'killed') return { at: endedAt, seen, kind: 'run', label, text: 'stopped', say: { phrase: 'stopped' }, right: duration(ms), ms }
   const total = runTally(s, r).total
-  return { at: endedAt, kind: 'run', label, text: `done · × ${total}`, say: { phrase: 'runDone', value: total }, right: duration(ms), ms }
+  return { at: endedAt, seen, kind: 'run', label, text: `done · × ${total}`, say: { phrase: 'runDone', value: total }, right: duration(ms), ms }
 }
 
 /** When something of the run last happened: its start, or the latest change of one of its agents. */
@@ -361,8 +368,8 @@ export function settleRuns(s: TreeState, now: number): TreeState {
     const last = lastSign(s, r)
     if (now - last < RUN_SETTLE_MS) continue
     next = patchRun(next, r.id, x => ({ ...x, settled: true, endedAt: last }))
-    const failed = runTally(next, r).failed > 0
-    next = withLog(next, runEndLog(next, runOf(next, r.id)!, failed ? 'failed' : 'completed', last))
+    const failed = runFailed(next, runOf(next, r.id)!)
+    next = withLog(next, runEndLog(next, runOf(next, r.id)!, failed ? 'failed' : 'completed', last, now))
   }
   return next
 }
@@ -472,7 +479,8 @@ export function stepped(s: TreeState, f: StepFacts, now: number): TreeState {
   for (const use of f.advisor) {
     const ms = use.endedAt === undefined ? undefined : Math.max(0, use.endedAt - use.startedAt)
     const adv = next.advisor
-    const calls = [...adv.calls, { at: use.startedAt, ms, by: f.agentId }].slice(-MAX_CALLS)
+    // When it started (`at`), and when the pane learnt of it (`seen`): the response brings it, seconds later.
+    const calls = [...adv.calls, { at: use.startedAt, seen: now, ms, by: f.agentId }].slice(-MAX_CALLS)
     next = {
       ...next,
       advisor: {
@@ -490,6 +498,7 @@ export function stepped(s: TreeState, f: StepFacts, now: number): TreeState {
     const who = whoOf(next, f.agentId)
     next = withLog(next, {
       at: use.startedAt,
+      seen: now,
       kind: 'advisor',
       agentId: f.agentId,
       label: 'advisor',
@@ -684,13 +693,17 @@ export type Readback = {
 
 /**
  * Which pending switches a read-back shows have taken effect, and which are
- * given up: still pending longer than `limitMs` after they were asked for.
+ * given up: still pending longer than `limitMs` after they were asked for,
+ * unless Claude Code still holds the command (`held`: it runs a queued one
+ * when it is idle, and a long turn outlasts the limit; the review of
+ * 2026-11-20).
  */
 export function pendingSettled(
   c: TreeChoices | undefined,
   r: Readback,
   now: number,
   limitMs: number,
+  held: ReadonlySet<'model' | 'effort' | 'advisor'> = new Set(),
 ): { modelDone: boolean; effortDone: boolean; advisorDone: boolean; givenUp: Array<{ command: 'model' | 'effort' | 'advisor'; value: string }> } {
   const model = c?.pendingModel
   const effort = c?.pendingEffort
@@ -703,9 +716,9 @@ export function pendingSettled(
     (advisor === 'off' ? r.advisor === null : r.advisor !== null && (r.advisor === advisor || modelName(r.advisor)?.family === advisor))
   const late = c?.pendingSince !== undefined && now - c.pendingSince > limitMs
   const givenUp: Array<{ command: 'model' | 'effort' | 'advisor'; value: string }> = []
-  if (late && model !== undefined && !modelDone) givenUp.push({ command: 'model', value: model })
-  if (late && effort !== undefined && !effortDone) givenUp.push({ command: 'effort', value: effort })
-  if (late && advisor !== undefined && !advisorDone) givenUp.push({ command: 'advisor', value: advisor })
+  if (late && model !== undefined && !modelDone && !held.has('model')) givenUp.push({ command: 'model', value: model })
+  if (late && effort !== undefined && !effortDone && !held.has('effort')) givenUp.push({ command: 'effort', value: effort })
+  if (late && advisor !== undefined && !advisorDone && !held.has('advisor')) givenUp.push({ command: 'advisor', value: advisor })
   return { modelDone, effortDone, advisorDone, givenUp }
 }
 
@@ -940,5 +953,17 @@ export function trimmed(s: TreeState): TreeState {
       return { ...r, gone: { ...gone, [key]: gone[key] + 1 } }
     })
   }
-  return { ...s, agents: s.agents.filter(a => !drop.has(a.id)), ...(runs ? { runs } : {}) }
+  return { ...s, agents: s.agents.filter(a => !drop.has(a.id)), ...(runs ? { runs } : {}), ...(s.choices ? { choices: forgotten(s.choices, drop) } : {}) }
+}
+
+/** What was chosen for agents the tree let go: let go too, so the lists do not grow all session (the review of 2026-11-20). */
+function forgotten(c: TreeChoices, drop: ReadonlySet<string>): TreeChoices {
+  const keep = <V>(m: Record<string, V> | undefined): Record<string, V> | undefined =>
+    m === undefined ? undefined : Object.fromEntries(Object.entries(m).filter(([id]) => !drop.has(id)))
+  return {
+    ...c,
+    ...(c.pins ? { pins: keep(c.pins) } : {}),
+    ...(c.runModels ? { runModels: keep(c.runModels) } : {}),
+    ...(c.exempt ? { exempt: c.exempt.filter(id => !drop.has(id)) } : {}),
+  }
 }

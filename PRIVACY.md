@@ -8,7 +8,7 @@ The mod sends nothing except its update check. The check is on by default and yo
 
 **The update check** runs at most once a day, when an interactive session starts:
 
-1. **On your machine:** `claude plugin list --json`, to read the installed version and where it came from. Nothing leaves your machine for this. If the copy was not installed from a marketplace (for example, one run with `--plugin-dir`), the check stops here.
+1. **On your machine:** `claude plugin list --json`, to read the installed version and where it came from. Nothing leaves your machine for this. On Windows, where Claude Code was installed with npm (`claude.cmd`), the mod runs it through `cmd.exe /d /c`, and the update command below the same way. If the copy was not installed from a marketplace (for example, one run with `--plugin-dir`), the check stops here.
 2. **One request,** only for a copy installed from a marketplace: a plain GET of `https://raw.githubusercontent.com/JZO001/forge-agent-tree/main/.claude-plugin/plugin.json`.
    - **Sent:** no cookies, no identifiers, nothing about you, your session or your code.
    - **Read:** only the `version` field.
@@ -32,4 +32,4 @@ The mod sends nothing except its update check. The check is on by default and yo
 - the options, kept as `/config` keeps them;
 - a model, effort or advisor you pick in the pane: the pane runs `/model`, `/effort` or `/advisor` for you, and Claude Code saves the choice as those commands do.
 
-**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its only other local processes play its sounds, and only with the Sound option on (on by default; switch it off on the options page): PowerShell on Windows, `paplay` or `aplay` on Linux. They play the plugin's own sound files and send nothing anywhere.
+**Elsewhere:** nothing. The mod writes no other files and makes no model calls. Its only other local processes play its sounds: in an interactive session with the Sound option on (on by default; switch it off on the options page), and when you press ► on the sounds page to hear one: PowerShell on Windows, `paplay` or `aplay` on Linux. They play the plugin's own sound files and send nothing anywhere.

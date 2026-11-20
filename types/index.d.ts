@@ -117,7 +117,10 @@ export type TreeMain = {
 }
 
 export type AdvisorCall = {
+  /** When the call started. */
   at: number
+  /** When the pane learnt of it: its response brings it, seconds after it started. The HUD's flash runs from it. */
+  seen?: number
   ms?: number
   /** The calling agent's id; absent when the main conversation called. */
   by?: string
@@ -142,7 +145,10 @@ export type TreeAdvisor = {
 export type LogKind = 'spawn' | 'done' | 'failed' | 'stopped' | 'waiting' | 'advisor' | 'context' | 'compact' | 'model' | 'message' | 'run'
 
 export type LogEntry = {
+  /** When it happened: the log is in this order, newest first. */
   at: number
+  /** When the pane learnt of it, where that came later (an advisor call, a run's end): the HUD types the row in from it. */
+  seen?: number
   kind: LogKind
   /** The agent the entry is about; absent for the main session. */
   agentId?: string
@@ -228,7 +234,6 @@ export type TreeChoices = {
   runModels?: Record<string, string>
 }
 
-/** What the pane shows: the tree, the help (`h`), the options (`o`). */
 /** What the pane shows: the tree, the help, the options page, or the sounds page under it (plan 09). */
 export type TreeView = 'tree' | 'help' | 'options' | 'sounds'
 
@@ -281,6 +286,20 @@ export type TreeUi = {
   closedRuns?: string[]
 }
 
+/**
+ * What the pane draws with, read off Claude Code's settings (its theme,
+ * `prefersReducedMotion`) and the options' locks. Kept across a reload, so the
+ * first drawing after a change of options is not in the defaults' colors.
+ */
+export type TreeLook = { theme: 'dark' | 'light' | 'ansi'; reduced: boolean; locked: string[] }
+
+/**
+ * What the pane did at this process's start, kept across a reload (a change of
+ * options reloads the plugin and its start runs again): a reload neither
+ * reopens a pane the person closed nor boots it and sounds its power-up again.
+ */
+export type TreeStart = { opened?: boolean; poweredUp?: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     'forge-agent-tree': {
@@ -289,6 +308,8 @@ declare module 'claude-code' {
       frame: number
       /** Bumped whenever the pane opens or closes: the line above the prompt draws again. */
       pane: number
+      look: Shaped<TreeLook>
+      start: Shaped<TreeStart>
     }
   }
 }

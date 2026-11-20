@@ -15,7 +15,7 @@
  * Every row keeps its width. No engine access: tested alone.
  */
 import type { TreeAgent, TreeState, TreeUi } from '../types'
-import { FAMILY_COLOR, LIMIT_THRESHOLDS, NAME_COLORS, PULSE_COLOR, TIME_COLOR, TRUNK_COLOR, brighter, cut, effortName, modelColor, modelName, width } from './format'
+import { FAMILY_COLOR, LIMIT_THRESHOLDS, NAME_COLORS, TIME_COLOR, TRUNK_COLOR, brighter, clusters, cut, effortName, modelColor, modelName, padEndCells, width } from './format'
 import type { LimitThresholds } from './format'
 import type { LayoutOptions, Mode, Rail, Row, Seg, ThemeKind } from './layout'
 import { runOf, runTally } from './model'
@@ -163,7 +163,10 @@ function fitTo(segs: Seg[], cols: number): Seg[] {
     let best = -1
     for (let i = 0; i < out.length; i++) {
       const t = out[i]!.text
-      if (/^ +$/.test(t) && t.length > 1 && (best < 0 || t.length > out[best]!.text.length)) best = i
+      // A gap gives its cells back, never the tree's indentation (a guide's spaces): the
+      // lines under it would slip a column (the user's screenshot of 2026-11-20, elcsuszas.jpg:
+      // a run's squad bar widened its description row, and its `│` moved left of its agents' `├`).
+      if (out[i]!.part !== 'guide' && /^ +$/.test(t) && t.length > 1 && (best < 0 || t.length > out[best]!.text.length)) best = i
     }
     if (best < 0) break
     const take = Math.min(over, out[best]!.text.length - 1)
@@ -267,7 +270,8 @@ function bars(segs: readonly Seg[], k: SkinContext, p: Palette): Seg[] {
     // The bar's color: the one most of its lit parts have (one may be the running light's).
     const tally = new Map<string, number>()
     for (const r of run) if (r.part === 'bar' && r.color && !r.live) tally.set(r.color, (tally.get(r.color) ?? 0) + width(r.text))
-    const base = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? run.find(r => r.color)?.color ?? 'cyan'
+    // An empty bar has no lit part: its rest carries its color (the review of 2026-11-20: a limit at 0% fell back to cyan).
+    const base = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? run.find(r => r.color)?.color ?? run.find(r => r.hue)?.hue ?? 'cyan'
     const color = p.hex ? (NEON_OF[base] ?? base) : base
     const moving = k.o.animate && lit >= 3 ? k.o.frame % lit : -1
     // The alarm (plan 08, F2): a bar in red (the context's ↯, a limit at its red mark) pulses, slowly.
@@ -376,9 +380,12 @@ function mainRow(row: Row, k: SkinContext, p: Palette): Row {
 // ── panels ──────────────────────────────────────────────────────────────
 
 function frameTop(row: Row, k: SkinContext, p: Palette): Row {
-  const t = (rowSegs(row) ?? []).find(s => s.part === 'title')?.text ?? ''
-  // A message's title keeps the agent's name as it is; the others go in capitals.
-  const title = t.startsWith('✎') ? t : upper(t, k.w.lang)
+  const seg = (rowSegs(row) ?? []).find(s => s.part === 'title')
+  const t = seg?.text ?? ''
+  // A message's title keeps the agent's name as it is; the others go in capitals, but
+  // for a name in them (a running agent's model panel, the review of 2026-11-20).
+  const keep = seg?.keep
+  const title = t.startsWith('✎') ? t : keep && t.includes(keep) ? t.split(keep).map(x => upper(x, k.w.lang)).join(keep) : upper(t, k.w.lang)
   const room = Math.max(1, k.cols - 8)
   const name = cut(title, room)
   const gap = Math.max(1, k.cols - 6 - 1 - width(name))
@@ -460,7 +467,8 @@ type Line = { row: Row; cells?: Cell[] }
 
 function split(segs: readonly Seg[]): Cell[] {
   const out: Cell[] = []
-  for (const s of segs) for (const ch of Array.from(s.text)) out.push({ ...s, text: ch })
+  // A sign with what joins it (an emoji's form, a flag's second half) stays one cell of the row.
+  for (const s of segs) for (const ch of clusters(s.text)) out.push({ ...s, text: ch })
   return out
 }
 
@@ -600,7 +608,7 @@ function typeIn(cells: Cell[], from: number, to: number, shown: number, p: Palet
   }
 }
 
-/** The newest log row types itself in, with a cursor. */
+/** A log row the pane has just learnt of types itself in, with a cursor (its `seen`: an advisor call or a run's end comes in after its own time). */
 function logMotion(line: Line, k: SkinContext, p: Palette): void {
   const row = line.row
   if (!line.cells || row.kind === 'keys' || row.kind === 'input' || row.at === undefined) return
@@ -614,7 +622,8 @@ function logMotion(line: Line, k: SkinContext, p: Palette): void {
 function advisorMotion(line: Line, k: SkinContext, p: Palette): void {
   const last = k.s.advisor.calls[k.s.advisor.calls.length - 1]
   if (!line.cells || !last) return
-  const since = k.o.now - last.at
+  // From when the pane learnt of it: the response brings the call seconds after it started (the review of 2026-11-20).
+  const since = k.o.now - (last.seen ?? last.at)
   if (since < 0 || since >= EFFECT_MS.advisor) return
   const steps = p.hex ? ['#FFFFFF', '#E6D9FF', '#C9B1FF'] : [flash(k, p), 'magentaBright', FAMILY_COLOR.fable]
   const color = steps[Math.min(steps.length - 1, Math.floor((since / EFFECT_MS.advisor) * steps.length))]!
@@ -698,7 +707,7 @@ function scan(lines: Line[], k: SkinContext, p: Palette): void {
 }
 
 /** The braille radar beside the empty tree's words: a ring, a sweep with its trail, two contacts lit as it passes. */
-export function radarCells(frame: number, w: number, h: number, p: Palette): Cell[][] {
+export function radarCells(frame: number, w: number, h: number, p: Palette, light = false): Cell[][] {
   const W = w * 2
   const H = h * 4
   const cx = (W - 1) / 2
@@ -729,7 +738,12 @@ export function radarCells(frame: number, w: number, h: number, p: Palette): Cel
     const glow = since < 0.3 ? 5 : since < 1.6 ? 4 : since < 3.2 ? 3 : 0
     if (glow) put(cx + R * r * Math.cos(a), cy + R * r * Math.sin(a), glow)
   }
-  const colors = p.hex ? ['', '#2A93A1', '#46CBDA', '#8AF1FB', '#D8FDFF', '#FFFFFF'] : ['', 'cyan', 'cyan', 'cyanBright', 'cyanBright', 'whiteBright']
+  // On a light ground the brightest are blue: white would not show there.
+  const colors = p.hex
+    ? ['', '#2A93A1', '#46CBDA', '#8AF1FB', '#D8FDFF', '#FFFFFF']
+    : light
+      ? ['', 'cyan', 'cyan', 'blue', 'blue', 'blue']
+      : ['', 'cyan', 'cyan', 'cyanBright', 'cyanBright', 'whiteBright']
   const bits = [
     [0x01, 0x08],
     [0x02, 0x10],
@@ -761,7 +775,7 @@ export function radarCells(frame: number, w: number, h: number, p: Palette): Cel
 function radar(lines: Line[], k: SkinContext, p: Palette): void {
   const first = lines.findIndex(l => l.row.kind === 'text' && l.row.role === 'radar')
   if (first < 0) return
-  const picture = radarCells(k.o.animate ? k.o.frame : 3, RADAR.w, RADAR.h, p)
+  const picture = radarCells(k.o.animate ? k.o.frame : 3, RADAR.w, RADAR.h, p, k.o.theme === 'light')
   const col = k.cols - RADAR.w - 1
   for (let r = 0; r < RADAR.h; r++) {
     const l = lines[first + r]
@@ -782,9 +796,42 @@ function radar(lines: Line[], k: SkinContext, p: Palette): void {
       used += 1
     }
     const blink = (c: Cell): Cell =>
-      c.part !== 'blink' ? c : k.o.animate ? { ...c, color: Math.floor(k.o.frame / 4) % 2 ? p.neonHi : p.neon, live: true } : { ...c, color: p.neon }
+      // Its light on: the neon's bright tint, or, where the named neon has none, the flash (blue on a light ground).
+      c.part !== 'blink' ? c : k.o.animate ? { ...c, color: Math.floor(k.o.frame / 4) % 2 ? (p.hex ? p.neonHi : flash(k, p)) : p.neon, live: true } : { ...c, color: p.neon }
     l.cells = [...keep.map(blink), ...picture[r]!, { text: ' ' }]
   }
+}
+
+/** A squad bar's most cells. */
+export const SQUAD_MOST = 12
+
+/**
+ * How many cells each count of a run's agents gets in its squad bar: as many as
+ * it has, or, for a run of more than `most`, a share of `most` in proportion,
+ * none that counts left out, never more than `most` together (the review of
+ * 2026-11-20: rounding each up to one made more).
+ */
+export function squadCells(counts: readonly number[], most: number): number[] {
+  const total = counts.reduce((a, b) => a + b, 0)
+  if (total <= most) return [...counts]
+  const exact = counts.map(n => (n * most) / total)
+  const cells = exact.map((x, i) => (counts[i] === 0 ? 0 : Math.max(1, Math.floor(x))))
+  let used = cells.reduce((a, b) => a + b, 0)
+  while (used > most) {
+    const i = cells.indexOf(Math.max(...cells))
+    cells[i] = cells[i]! - 1
+    used -= 1
+  }
+  // what flooring left over, to the largest remainders
+  const order = exact.map((x, i) => ({ i, rest: x - Math.floor(x) })).sort((a, b) => b.rest - a.rest)
+  for (const { i } of order) {
+    if (used >= most) break
+    if (counts[i]! > 0) {
+      cells[i] = cells[i]! + 1
+      used += 1
+    }
+  }
+  return cells
 }
 
 /** A workflow run's squad bar before its description: a cell an agent, in its state's color; one at work shimmers. */
@@ -803,14 +850,13 @@ function squad(line: Line, k: SkinContext, p: Palette): void {
   const total = counts.reduce((n, c) => n + c[0], 0)
   if (total === 0) return
   // at most 12 cells: a larger run's counts shrink in proportion, none of them to nothing
-  const most = 12
-  const scale = total > most ? most / total : 1
+  const sizes = squadCells(counts.map(c => c[0]), SQUAD_MOST)
   const bar: Cell[] = []
-  for (const [n, color, working] of counts) {
-    const m = n === 0 ? 0 : Math.max(1, Math.round(n * scale))
+  for (const [g, [, color, working]] of counts.entries()) {
+    const m = sizes[g] ?? 0
     for (let i = 0; i < m; i++) {
       const lit = working && k.o.animate && (Math.floor(k.o.frame / 2) + i) % 2 === 0
-      bar.push({ text: '▌', color: lit ? lighter(color, 0.55, p) : color, ...(working && k.o.animate ? { live: true as const } : {}) })
+      bar.push({ text: '▌', color: lit ? lighter(color, 0.55, p, k) : color, ...(working && k.o.animate ? { live: true as const } : {}) })
     }
   }
   const text = line.cells.findIndex(c => c.part !== 'guide' && c.text.trim() !== '')
@@ -852,10 +898,10 @@ function motion(rows: readonly Row[], k: SkinContext, p: Palette): Row[] {
  */
 export function effectsEnd(s: TreeState): number {
   let end = 0
-  const newest = s.log[0]
-  if (newest) end = Math.max(end, newest.at + EFFECT_MS.type)
+  // A log row types in from when the pane learnt of it, wherever its own time puts it in the log.
+  for (const e of s.log) end = Math.max(end, (e.seen ?? e.at) + EFFECT_MS.type)
   const call = s.advisor.calls[s.advisor.calls.length - 1]
-  if (call) end = Math.max(end, call.at + EFFECT_MS.advisor)
+  if (call) end = Math.max(end, (call.seen ?? call.at) + EFFECT_MS.advisor)
   for (const a of s.agents) {
     end = Math.max(end, a.startedAt + EFFECT_MS.spawn)
     if (a.endedAt !== undefined) end = Math.max(end, a.endedAt + Math.max(EFFECT_MS.done, EFFECT_MS.glitch))
@@ -909,7 +955,7 @@ function bootRows(pane: readonly Row[], k: SkinContext, p: Palette, since: numbe
     const at = 300 + i * 160
     if (since < at) return
     const done = since >= at + 120
-    const lead: Seg[] = [{ text: '▸ ', color: p.neon }, { text: label.padEnd(9), color: p.railLabel }, { text: value }]
+    const lead: Seg[] = [{ text: '▸ ', color: p.neon }, { text: padEndCells(label, 9), color: p.railLabel }, { text: value }]
     const tail: Seg[] = done ? [{ text: ' ' }, { text: 'OK', color: p.hex ? '#3DDC84' : 'success', bold: true }] : [{ text: ' ' }, { text: SPIN[k.o.frame % SPIN.length]!, color: p.neon }, { text: ' ' }]
     const dots = Math.max(1, cols - cells(lead) - cells(tail) - 1)
     out[2 + i] = [...lead, { text: ' ' }, { text: '·'.repeat(dots), color: p.rail }, ...tail]

@@ -139,6 +139,20 @@ export function updateCommand(install: Installed): string[] {
   return ['claude', 'plugin', 'update', install.id, ...(install.scope && SCOPES.has(install.scope) ? ['--scope', install.scope] : [])]
 }
 
+/** An argument cmd.exe reads as itself: no `&`, `|`, `<`, `>`, `^`, `%`, `!`, quotes, brackets or spaces. */
+const CMD_SAFE = /^[A-Za-z0-9._@:/=+-]+$/
+
+/**
+ * A `claude` command through cmd.exe (`cmd.exe /d /c claude …`): on Windows an
+ * npm install's `claude` is `claude.cmd`, which a process started with no shell
+ * does not find (the user's choice of 2026-11-20). Only where cmd.exe can read
+ * every argument as itself: a marketplace's name never becomes a command.
+ */
+export function viaShell(argv: readonly string[]): string[] | undefined {
+  if (argv[0] !== 'claude' || !argv.slice(1).every(a => CMD_SAFE.test(a))) return undefined
+  return ['cmd.exe', '/d', '/c', ...argv]
+}
+
 /**
  * One check, the cheap steps first: the day's limit from the store, then the
  * install, then the repository's version, and only for a newer one the update.

@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND_GAP, DEFAULT_SETTINGS, PICKED_COLOR, aliasOf, bandLine, fieldKey, frameRows, hasLiveCell, isButton, layout, modelChoiceLabel, rowWidth, runOpen } from '../hooks/layout'
+import { BAND_GAP, DEFAULT_SETTINGS, PICKED_COLOR, aliasOf, bandLine, fieldKey, frameRows, hasLiveCell, isButton, layout, modelChoiceLabel, placeholderCells, rowWidth, runOpen, themeKind } from '../hooks/layout'
 import { PULSE_COLOR, TIME_COLOR, TITLE_COLOR, TRUNK_COLOR, width } from '../hooks/format'
 import { LANGS, wordsFor } from '../hooks/words'
 import type { LayoutOptions, Row, Settings } from '../hooks/layout'
-import { EFFECT_MS, RADAR, effectsEnd } from '../hooks/hud'
-import { emptyTree } from '../hooks/model'
-import type { PickerId, TreeUi } from '../types'
+import { EFFECT_MS, RADAR, effectsEnd, squadCells } from '../hooks/hud'
+import { emptyTree, runLaunched, runNoticed, spawned, turnCompleted } from '../hooks/model'
+import type { PickerId, TreeState, TreeUi } from '../types'
 import { NOW, busyTree, workflowTree } from './fixture'
 
 const UI: TreeUi = { showFinished: false, showLog: true, view: 'tree' }
@@ -380,11 +380,26 @@ describe('rate limits', () => {
     expect(under.find(x => x.text === ' 89%')).toMatchObject({ color: 'warning' })
   })
 
+  test('in Japanese, Korean and Chinese the agents’ times still take one column: padded by cells (review of 2026-11-20)', () => {
+    for (const lang of ['ja', 'ko', 'zh'] as const) {
+      const rows = layout(busyTree(), { ...UI, lang, showFinished: true }, { cols: 72, rows: 60, now: NOW, frame: 0, animate: false })
+      const times = rows
+        .filter(r => (r.kind === 'text' || r.kind === 'press') && r.agent !== undefined && r.segs.some(x => x.press?.kind === 'agent'))
+        .map(r => (r.kind === 'keys' ? '' : (r.segs[r.segs.length - 1]?.text ?? '')))
+      expect(times.length > 2, lang).toBe(true)
+      expect(new Set(times.map(t => width(t))).size, `${lang}: ${times.join('|')}`).toBe(1)
+    }
+  })
+
   test('with little room the word for resets goes first, then the countdown: the day and the time stay longest', () => {
     const all = (cols: number) => draw(cols, undefined, HU).find(l => l.startsWith('összes'))
     expect(all(78)).toMatch(/ újraindul péntek 18:12 · 2n4ó múlva$/)
     expect(all(56)).toMatch(/ péntek 18:12 · 2n4ó múlva$/)
     expect(all(44)).toMatch(/ péntek 18:12$/)
+    // in English too: at 44 columns the full day alone, not a short day with the countdown (review of 2026-11-20)
+    const en = (cols: number) => draw(cols, undefined, UI).find(l => l.startsWith('all'))
+    expect(en(44)).toMatch(/ Friday 18:12$/)
+    expect(en(44)).not.toMatch(/Fri 18:12 · in/)
   })
 
   test('the narrow view names the windows 5h and 7d, as times', () => {
@@ -441,6 +456,12 @@ describe('motion', () => {
   test('a bar with fewer than three full cells stays still', () => {
     const segs = ctxRow(rowsAt(2, true, s => (s.main.contextPercent = 25)))
     expect(segs.some(x => x.color === 'cyanBright' || x.color === 'blueBright')).toBe(false)
+  })
+
+  test('a bar of exactly three full cells has its light (review of 2026-11-20)', () => {
+    // 35% of ten cells: three full and a part
+    const segs = ctxRow(rowsAt(2, true, s => (s.main.contextPercent = 35)))
+    expect(segs.filter(x => x.live === true && x.color === 'cyanBright').map(x => x.text)).toEqual(['█'])
   })
 
   test('nothing moves without motion; idle, the bars still shimmer and the light still runs on the tree lines (as the user asked)', () => {
@@ -807,9 +828,10 @@ describe('the session model and effort', () => {
 describe('a pending switch', () => {
   test('fits every width in every language', () => {
     for (const cols of [36, 44, 56, 72, 120]) {
-      for (const ui of [UI, HU]) {
+      // every language, not English and Hungarian only (review of 2026-11-20)
+      for (const ui of ALL_LANGS) {
         const s = busyTree()
-        s.choices = { ...s.choices, pendingModel: 'sonnet[1m]', pendingEffort: 'medium' }
+        s.choices = { ...s.choices, pendingModel: 'sonnet[1m]', pendingEffort: 'medium', pendingAdvisor: 'opus' }
         for (const row of layout(s, ui, { cols, now: NOW, frame: 0, animate: false })) {
           expect(rowWidth(row) <= cols, `${cols}: ${lineOf(row)}`).toBe(true)
         }
@@ -1242,6 +1264,21 @@ describe('workflow runs', () => {
     expect(segOf(rows.find(r => lineOf(r).includes('▣ lint-sweep')), '▣')).toMatchObject({ color: 'error' })
   })
 
+  test('a run taken as ended with no notification, one of its agents failed: red, always shown, red on the line above the prompt (review of 2026-11-20)', () => {
+    const s = workflowTree()
+    // review-changes: m2 failed; its last agent ends, and no notification comes
+    const settled: TreeState = {
+      ...s,
+      agents: s.agents.map(a => (a.id === 'm1' ? { ...a, state: 'done' as const, endedAt: NOW } : a)),
+      runs: s.runs!.map(r => (r.id === 'wf_review' ? { ...r, settled: true, endedAt: NOW } : r)),
+    }
+    const rows = rowsOf(UI, 56, undefined, settled)
+    expect(segOf(rows.find(r => lineOf(r).includes('▣ review-changes')), '▣')).toMatchObject({ color: 'error' })
+    const band = bandLine(settled, 120, { frame: 0, animate: false })
+    const signs = band.find(p => p.runs !== undefined)
+    expect(signs?.runs?.find(r => r.text.includes('▣') && r.style.color === 'error')).toBeDefined()
+  })
+
   test('the counts each in a color, none gray: done green, at work in the model color, failed red, waiting and stopped yellow', () => {
     const s = workflowTree()
     s.agents = s.agents.map(a => (a.id === 'm3' ? { ...a, state: 'waiting' as const } : a.id === 'm4' ? { ...a, state: 'stopped' as const } : a))
@@ -1266,11 +1303,28 @@ describe('workflow runs', () => {
   })
 
   test('a short pane keeps a run row over each of its agents it shows', () => {
-    for (const rows of [16, 12, 10]) {
+    // where its agents start to show (review of 2026-11-20: at 16, 12 and 10 rows none did, so nothing was checked)
+    for (const rows of [19, 20, 21]) {
       const lines = rowsOf(UI, 56, rows).map(lineOf)
       expect(lines.length <= rows).toBe(true)
-      if (lines.some(l => l.includes('verify:'))) expect(lines.some(l => l.includes('▣ review-changes')), `${rows} rows`).toBe(true)
+      const agent = lines.findIndex(l => l.includes('verify:'))
+      const run = lines.findIndex(l => l.includes('▣ review-changes'))
+      expect(agent >= 0, `${rows} rows: an agent of the run shows`).toBe(true)
+      expect(run >= 0 && run < agent, `${rows} rows: its run's row above it`).toBe(true)
     }
+    for (const rows of [16, 12, 10]) expect(rowsOf(UI, 56, rows).length <= rows).toBe(true)
+  })
+
+  test("an agent's own agents hang under it, its line running beside its detail lines (review of 2026-11-20)", () => {
+    const s = busyTree()
+    s.agents.push({ id: 'k1', parentId: 'a1', description: 'Child probe', type: 'Explore', state: 'running', since: NOW, startedAt: NOW - 5000, tools: 0, model: 'claude-haiku-5-5' })
+    const lines = draw(56, undefined, UI, s)
+    const i = lines.findIndex(l => l.includes('Find auth handlers'))
+    const k = lines.findIndex(l => l.includes('Child probe'))
+    expect(i >= 0 && k > i).toBe(true)
+    // a1's detail lines carry its own line down to its child, which hangs one level in
+    expect(lines[i + 1]).toMatch(/^│  │ /)
+    expect(lines[k]).toMatch(/^│  └─ /)
   })
 
   test("the log: a run's start and its end, by its name, in the pane's language", () => {
@@ -1358,6 +1412,22 @@ describe("the state signs and the names in color (the user's request, no gray)",
   const segsOf = (row: Row | undefined) => (row && row.kind !== 'keys' ? row.segs : [])
   const rowOf = (rows: Row[], name: string) => rows.find(r => lineOf(r).includes(name))
 
+  test("the main row idle: its ○ in the main model's color, not gray, the word dim; in every language (the user's choice of 2026-11-20)", () => {
+    const s = busyTree()
+    s.main.isBusy = false
+    for (const l of LANGS) {
+      const rows = layout(s, { ...UI, lang: l.code }, { cols: 56, now: NOW, frame: 2, animate: true })
+      const main = segsOf(rows.find(r => r.kind === 'press' && r.key === 'main'))
+      const sign = main.find(x => x.text === '○')
+      expect(sign, l.code).toMatchObject({ text: '○', color: 'claude' })
+      expect(sign?.dim, l.code).toBeUndefined()
+      expect(main[main.indexOf(sign!) + 1], l.code).toMatchObject({ dim: true })
+    }
+    // the HUD keeps it so
+    const hud = layout(s, UI, { cols: 56, now: NOW, frame: 2, animate: true, look: 'hud', theme: 'dark' })
+    expect(segsOf(hud.find(r => r.kind === 'press' && r.key === 'main')).find(x => x.text === '○')?.dim).toBeUndefined()
+  })
+
   test("an agent's state sign takes the run counts' colors: done green, stopped yellow, failed red, at work in its model's color", () => {
     const s = workflowTree()
     s.agents = s.agents.map(a => (a.id === 'm4' ? { ...a, state: 'stopped' as const } : a.id === 'm5' ? { ...a, state: 'starting' as const } : a))
@@ -1412,6 +1482,14 @@ describe('the empty rows in the header (the user asked for them)', () => {
     const lines = layout(s, UI, { cols: 56, now: NOW, frame: 0, animate: false }).map(lineOf)
     const head = lines.slice(0, lines.findIndex(l => l.startsWith('───')))
     for (let i = 1; i < head.length; i++) expect(head[i]!.trim() === '' && head[i - 1]!.trim() === '', `${i}`).toBe(false)
+    // exactly that one more besides the title's, right before the team (review of 2026-11-20: dropping both passed)
+    const blanks = head.map((l, i) => (l.trim() === '' ? i : -1)).filter(i => i >= 0)
+    expect(blanks).toHaveLength(2)
+    expect(head[blanks[1]! + 1]).toMatch(/^team /)
+    // the HUD names that rail for the group it opens: the crew's
+    const hud = layout(s, UI, { cols: 56, now: NOW, frame: 0, animate: false, look: 'hud', theme: 'dark' }).map(lineOf)
+    const team = hud.findIndex(l => l.startsWith('TEAM'))
+    expect(hud[team - 1]).toMatch(/^┌ CREW ┄+┐$/)
   })
 })
 
@@ -1584,6 +1662,116 @@ describe('the Forge HUD (plan 08)', () => {
     expect(lines.at(-2)).toMatch(/^└┄+┘$/)
     // as many rows as the classic look
     expect(lines.length).toBe(draw(56).length)
+  })
+
+  test('the lamp: a measured context at 75% is CAUTION, an estimate is not; the person’s own marks move it (review of 2026-11-20)', () => {
+    const title = (s: TreeState, limits?: { warn: number; alert: number }) =>
+      lineOf(layout(s, UI, { cols: 56, now: NOW, frame: 0, animate: true, look: 'hud', theme: 'dark', ...(limits ? { limits } : {}) })[0]!)
+    const calm = busyTree()
+    calm.main.contextPercent = 40
+    calm.main.contextEstimated = undefined
+    calm.main.limits = [{ kind: 'five_hour', percent: 20 }]
+    expect(title(calm)).toMatch(/◉ NOMINAL ▾en$/)
+    expect(title({ ...calm, main: { ...calm.main, contextPercent: 75 } })).toMatch(/◉ CAUTION ▾en$/)
+    expect(title({ ...calm, main: { ...calm.main, contextPercent: 74 } })).toMatch(/◉ NOMINAL ▾en$/)
+    // an estimate (no response has measured the window) lights nothing
+    expect(title({ ...calm, main: { ...calm.main, contextPercent: 80, contextEstimated: true } })).toMatch(/◉ NOMINAL ▾en$/)
+    // the marks as the person set them: yellow from 40%, red from 95%
+    const marks = { warn: 40, alert: 95 }
+    expect(title({ ...calm, main: { ...calm.main, limits: [{ kind: 'five_hour', percent: 50 }] } }, marks)).toMatch(/◉ CAUTION ▾en$/)
+    expect(title({ ...calm, main: { ...calm.main, limits: [{ kind: 'five_hour', percent: 92 }] } }, marks)).toMatch(/◉ CAUTION ▾en$/)
+    expect(title({ ...calm, main: { ...calm.main, limits: [{ kind: 'five_hour', percent: 95 }] } }, marks)).toMatch(/◉ CRITICAL ▾en$/)
+  })
+
+  test('with no limits, the rail before the team is CREW, never LIMITS, in a short pane too (review of 2026-11-20)', () => {
+    // A tree of a row or two (none, or one finished agent), the advisor only saying off, no limits, nothing logged:
+    // at 15 rows one gap of the three is left out, and the one left before the team was named LIMITS.
+    let crew = 0
+    for (const tree of ['empty', 'one finished'] as const) {
+      const s = busyTree()
+      s.main.limits = undefined
+      s.agents = tree === 'empty' ? [] : s.agents.filter(a => a.state === 'done').slice(0, 1)
+      s.runs = []
+      s.advisor = { total: 0, calls: [], off: true }
+      s.main.isBusy = false
+      s.log = []
+      for (const rows of [undefined, 24, 18, 17, 16, 15, 14, 13, 12]) {
+        const lines = hud(UI, 56, rows, s).map(lineOf)
+        expect(lines.some(l => /^┌ LIMITS/.test(l)), `${tree}, ${rows} rows`).toBe(false)
+        const team = lines.findIndex(l => l.startsWith('TEAM'))
+        if (team > 0 && /^┌ /.test(lines[team - 1]!)) {
+          expect(lines[team - 1], `${tree}, ${rows} rows`).toMatch(/^┌ CREW ┄+┐$/)
+          crew += 1
+        }
+      }
+    }
+    // the rail before the team was there to name in some of these
+    expect(crew > 0).toBe(true)
+  })
+
+  test('an empty bar keeps its color: a limit at 0% is drawn in green’s tint, as one at 30% (review of 2026-11-20)', () => {
+    const s = busyTree()
+    s.main.limits = [
+      { kind: 'five_hour', percent: 0 },
+      { kind: 'seven_day', percent: 30 },
+    ]
+    const rows = hud(UI, 56, undefined, s)
+    const unlit = (label: string): string | undefined => {
+      const row = rows.find(r => lineOf(r).startsWith(label))
+      const segs = row && row.kind !== 'keys' ? row.segs : []
+      // the unlit segments: the last run of ▌ before the share
+      return [...segs].reverse().find(x => /^▌+$/.test(x.text) && x.text.length > 1)?.color
+    }
+    expect(unlit('SESSION')).toBeDefined()
+    expect(unlit('SESSION')).toBe(unlit('ALL'))
+  })
+
+  test('on a light ground nothing flashes white, and the ◌ still blinks; on ANSI too (review of 2026-11-20)', () => {
+    const white = (rows: readonly Row[]) => rows.some(r => r.kind !== 'keys' && r.segs.some(x => x.color === 'whiteBright' || x.color === '#FFFFFF'))
+    const blinkColor = (rows: readonly Row[]) => rows.flatMap(r => (r.kind === 'keys' ? [] : r.segs)).find(x => x.text === '◌')?.color
+    for (const frame of [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 28, 32]) {
+      const radar = layout(emptyTree(NOW), UI, { cols: 56, rows: 40, now: NOW, frame, animate: true, look: 'hud', theme: 'light' })
+      expect(white(radar), `radar, frame ${frame}`).toBe(false)
+      const squad = layout(workflowTree(), UI, { cols: 56, rows: 60, now: NOW, frame, animate: true, look: 'hud', theme: 'light' })
+      expect(white(squad), `squad, frame ${frame}`).toBe(false)
+    }
+    for (const theme of ['light', 'ansi'] as const) {
+      const at = (frame: number) => blinkColor(layout(emptyTree(NOW), UI, { cols: 56, rows: 40, now: NOW, frame, animate: true, look: 'hud', theme }))
+      expect(at(0), theme).toBeDefined()
+      expect(at(0), theme).not.toBe(at(4))
+    }
+  })
+
+  test('Claude Code’s theme names: the light ones light (light-ansi too), dark-ansi ANSI, the rest dark (review of 2026-11-20)', () => {
+    expect(themeKind('light')).toBe('light')
+    expect(themeKind('light-daltonized')).toBe('light')
+    expect(themeKind('light-ansi')).toBe('light')
+    expect(themeKind('dark-ansi')).toBe('ansi')
+    expect(themeKind('dark-daltonized')).toBe('dark')
+    expect(themeKind('dark')).toBe('dark')
+    expect(themeKind(undefined)).toBe('dark')
+  })
+
+  test('a running agent’s model panel keeps the agent’s name as written, the rest in capitals (review of 2026-11-20)', () => {
+    const lines = hud({ ...UI, picker: 'runModel', pickerFor: 'a1' }).map(lineOf)
+    expect(lines.find(l => l.startsWith('┏━━ '))).toMatch(/^┏━━ Find auth handlers · MODEL /)
+    // the message panel's title keeps it too, as before
+    expect(hud({ ...UI, compose: 'a1' }).map(lineOf).find(l => l.startsWith('┏━━ '))).toMatch(/Find auth handlers/)
+  })
+
+  test('a squad bar takes at most 12 cells, each count that is there at least one (review of 2026-11-20)', () => {
+    expect(squadCells([3, 1, 0, 2], 12)).toEqual([3, 1, 0, 2])
+    for (const counts of [
+      [100, 1, 1, 1],
+      [10, 10, 10, 10],
+      [13, 0, 0, 0],
+      [1, 1, 1, 50],
+      [7, 7, 0, 0],
+    ]) {
+      const cells = squadCells(counts, 12)
+      expect(cells.reduce((a, b) => a + b, 0), counts.join(',')).toBe(12)
+      counts.forEach((n, i) => expect(n === 0 ? cells[i] === 0 : cells[i]! >= 1, counts.join(',')).toBe(true))
+    }
   })
 
   test('the log’s clock ticks its seconds while the pane moves, live so an idle pane keeps redrawing; still, it shows minutes', () => {
@@ -1795,13 +1983,58 @@ describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
   test('a waiting agent’s ‖ blinks; a red bar pulses', () => {
     const wait = (f: number) => cellsOf(at({ frame: f }).find(r => lineOf(r).includes('Migrate session store'))).find(c => c.text === '‖')?.color
     expect(wait(0)).not.toBe(wait(4))
+    // A lit cell the running light is not on (the 5th), at the wave's low and its high. The test before
+    // looked at the first cell, which the running light is on at frame 0: it could not fail (review of 2026-11-20).
+    const lit = (s: TreeState, f: number) => cellsOf(rowOf(at({ frame: f }, s), 'CTX')).filter(c => c.text === '▌')[4]?.color
     const hot = busyTree()
     hot.main.contextPercent = 93
-    const bar = (f: number) => cellsOf(at({ frame: f }, hot).find(r => lineOf(r).startsWith('CTX'))).filter(c => c.text === '▌' && !c.live).map(c => c.color)
-    // the lit segments (the running light aside) brighten and dim
-    const lit = (f: number) => cellsOf(at({ frame: f }, hot).find(r => lineOf(r).startsWith('CTX'))).find(c => c.text === '▌')?.color
-    expect(lit(0)).not.toBe(lit(8))
-    expect(bar(0).length).toBeGreaterThan(0)
+    expect(lit(hot, 0)).toBeDefined()
+    expect(lit(hot, 0)).not.toBe(lit(hot, 8))
+    // a bar not in red stands steady
+    const calm = busyTree()
+    calm.main.contextPercent = 55
+    expect(lit(calm, 0)).toBe(lit(calm, 8))
+  })
+
+  test('the core beats only while the main session works; the title’s light sweeps left to right (review of 2026-11-20)', () => {
+    const core = (busy: boolean, f: number) => {
+      const s = busyTree()
+      s.main.isBusy = busy
+      return cellsOf(rowOf(at({ frame: f }, s), '⬢')).find(c => c.text === '⬢')?.color
+    }
+    // idle the core keeps its violet, but for the comet's white as it sends one; at work it beats through lighter violets
+    const colors = (busy: boolean) => new Set(Array.from({ length: 16 }, (_, f) => core(busy, f)))
+    const still = new Set(['#8573FA', '#FFFFFF'])
+    expect([...colors(false)].every(c => still.has(c!)), [...colors(false)].join(' ')).toBe(true)
+    expect([...colors(true)].some(c => !still.has(c!)), [...colors(true)].join(' ')).toBe(true)
+    const litRule = (f: number) => {
+      const cells = cellsOf(at({ frame: f })[0]).filter(c => c.text === '━')
+      const base = cells[0]!.color
+      return cells.map((c, i) => (c.color !== base ? i : -1)).filter(i => i >= 0)
+    }
+    const a = litRule(10)
+    expect(a.length > 0).toBe(true)
+    expect(litRule(11)).toEqual(a.map(i => i + 1))
+  })
+
+  test('the advisor’s ◆ flashes, and a log row types in, when the pane learns of them, seconds after they began (review of 2026-11-20)', () => {
+    const s = busyTree()
+    const calls = s.advisor.calls
+    s.advisor = { ...s.advisor, calls: [...calls.slice(0, -1), { ...calls[calls.length - 1]!, at: NOW - 6000, seen: NOW - 100 }] }
+    s.log = [{ ...s.log[0]!, at: NOW - 6000, seen: NOW - 300 }, ...s.log.slice(1)]
+    const rows = at({ frame: 5 }, s)
+    expect(cellsOf(rows.find(r => lineOf(r).startsWith('◆')))[0]).toMatchObject({ text: '◆', color: '#FFFFFF' })
+    expect(lineOf(rows.find(r => r.kind === 'text' && r.role === 'log')!)).toContain('▌')
+  })
+
+  test('the fast pace lasts for each kind of effect: a log row, an advisor call, a start, an end (review of 2026-11-20)', () => {
+    const quiet = emptyTree(NOW - 600_000)
+    expect(effectsEnd(quiet)).toBe(0)
+    const one = (fields: Partial<TreeState['agents'][number]>): TreeState['agents'][number] => ({ id: 'x', description: 'x', type: 'Explore', state: 'running', since: NOW, startedAt: NOW, tools: 0, ...fields })
+    expect(effectsEnd({ ...quiet, log: [{ at: NOW - 9000, seen: NOW, kind: 'run', label: 'x', text: 'done' }] })).toBe(NOW + EFFECT_MS.type)
+    expect(effectsEnd({ ...quiet, advisor: { total: 1, calls: [{ at: NOW - 9000, seen: NOW }] } })).toBe(NOW + EFFECT_MS.advisor)
+    expect(effectsEnd({ ...quiet, agents: [one({})] })).toBe(NOW + EFFECT_MS.spawn)
+    expect(effectsEnd({ ...quiet, agents: [one({ state: 'done', startedAt: NOW - 60_000, endedAt: NOW })] })).toBe(NOW + Math.max(EFFECT_MS.done, EFFECT_MS.glitch))
   })
 
   test('a panel unfolds a row at a time as it opens', () => {
@@ -1850,6 +2083,35 @@ describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
     expect(radar(layout(s, UI, { cols: 56, rows: 20, now: NOW, frame: 0, animate: true, look: 'hud' }))).toBe(false)
   })
 
+  test('the squad bar never shifts the tree: the run’s own line in its description row stays over its agents’ branches (the user’s screenshot of 2026-11-20)', () => {
+    // As in elcsuszas.jpg: a run, the last node under main, opened, its description filling its row.
+    const about = 'Three Haiku agents, each replies with a single word'
+    let s: TreeState = emptyTree(NOW - 60_000)
+    s = { ...s, main: { ...s.main, model: 'claude-opus-5-5', isBusy: true, turnStartedAt: NOW - 9000, prompt: 'have the hooks and tests folders reviewed' } }
+    s = runLaunched(s, { runId: 'wf_1', name: 'one-word-trio', about, taskId: 't1' }, NOW - 5000)
+    for (const i of [1, 2, 3]) {
+      s = spawned(s, { agentId: `m${i}`, description: `word ${i}`, type: 'workflow-subagent', model: 'claude-haiku-5-5', workflow: true, run: 'wf_1' }, NOW - 4000)
+      s = turnCompleted(s, { agentId: `m${i}`, reason: 'answer' }, NOW - 3000)
+    }
+    s = runNoticed(s, { taskId: 't1', status: 'completed', durationMs: 2000 }, NOW - 2000)
+    for (const cols of [44, 50, 54, 56, 60, 72, 120]) {
+      for (const look of ['classic', 'hud'] as const) {
+        // descriptions of every length about the row's: shorter, just filling it, longer
+        for (const text of [about.slice(0, 20), about.slice(0, cols - 5), about.slice(0, cols - 4), `${about} ${about}`]) {
+          const t: TreeState = { ...s, runs: s.runs!.map(r => ({ ...r, about: text })) }
+          const lines = layout(t, { ...UI, openRuns: ['wf_1'] }, { cols, now: NOW, frame: 3, animate: true, look, theme: 'dark' }).map(lineOf)
+          const desc = lines.findIndex(l => /[│┃] .*(▌|Three)/.test(l) && !/[├└┣┗]/.test(l))
+          const word = lines.findIndex(l => l.includes('word 1'))
+          const which = `${look} ${cols} "${text.slice(0, 12)}…" (${text.length})`
+          expect(desc >= 0 && word === desc + 1, which).toBe(true)
+          // the description row's line in the column its agents branch from
+          expect(lines[desc]!.search(/[│┃]/), `${which}: ${lines[desc]} / ${lines[word]}`).toBe(lines[word]!.search(/[├└┣┗]/))
+          expect(width(lines[desc]!) <= cols, which).toBe(true)
+        }
+      }
+    }
+  })
+
   test('a workflow run’s squad bar: a cell an agent before its description, in its state’s color', () => {
     const rows = at({ frame: 3 }, workflowTree())
     const about = rows.find(r => r.kind === 'text' && r.role === 'about')!
@@ -1857,6 +2119,24 @@ describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
     const colors = cellsOf(about).filter(c => c.text === '▌').map(c => c.color)
     expect(colors.slice(0, 4)).toEqual(['#3DDC84', '#3DDC84', '#3DDC84', '#3DDC84'])
     expect(colors[5]).toBe('#FF4D6D')
+    // the one at work (m1, Haiku) in its model's color, shimmering: it changes from frame to frame, the others stand (review of 2026-11-20)
+    const at4 = (f: number) => cellsOf(at({ frame: f }, workflowTree()).find(r => r.kind === 'text' && r.role === 'about')).filter(c => c.text === '▌').map(c => c.color)
+    const [a, b] = [at4(0), at4(2)]
+    expect(a[4]).not.toBe(b[4])
+    expect([a[4], b[4]]).toContain('success')
+    expect(a.filter((_, i) => i !== 4)).toEqual(b.filter((_, i) => i !== 4))
+  })
+
+  test('a new agent’s branch lights white as it starts (review of 2026-11-20)', () => {
+    const scan = fresh().agents.find(a => a.description === 'Scan API routes')!.id
+    // every cell of its branch white; the comets run over it the same way at a frame, so set one frame against itself two seconds later
+    const allWhite = (frame: number, now = NOW) => {
+      const row = at({ frame, now }, fresh()).find(r => r.kind !== 'keys' && r.kind !== 'input' && r.agent === scan)!
+      const branch = cellsOf(row).filter(c => c.part === 'guide' && c.text.trim() !== '')
+      return branch.length > 0 && branch.every(c => c.color === '#FFFFFF')
+    }
+    const frames = Array.from({ length: 16 }, (_, f) => f)
+    expect(frames.some(f => allWhite(f) && !allWhite(f, NOW + 2000))).toBe(true)
   })
 
   test('the boot sequence: the title types in, the systems report OK, a bar fills, the pane draws itself in', () => {
@@ -1897,7 +2177,8 @@ describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
     expect(effectsEnd(emptyTree(NOW))).toBe(0)
   })
 
-  test('every row fits in motion: every language, frame and fresh event, the panels opening, the boot', () => {
+  // Every language, width, frame and event: some three thousand drawings, seconds on a loaded machine (the kit's limit is 5 s by default).
+  test('every row fits in motion: every language, frame and fresh event, the panels opening, the boot', { timeoutMs: 30_000 }, () => {
     for (const cols of [36, 56, 120]) {
       for (const ui of ALL_LANGS) {
         for (const frame of [0, 7, 21]) {
@@ -1921,3 +2202,37 @@ describe('the Forge HUD in motion (plan 08, F2 and F3)', () => {
     }
   })
 })
+
+describe('the message field (the user\u2019s live check of 2026-11-20)', () => {
+  // The hint Claude Code 2.1.328 adds after a focused field: ` ⏎ `, and for a
+  // field of two lines or more ` · shift+⏎ new line` (or ` · \\⏎ new line`)
+  // where the room after the label less that still holds half the columns.
+  const hint = (cols: number, room: number, lines: number, form: 'shift+⏎' | '\\⏎'): number => {
+    const short = ' ⏎ '
+    const long = `${short} · ${form} new line`
+    return lines > 1 && room - width(long) >= cols / 2 ? width(long) : width(short)
+  }
+
+  test('its blank placeholder leaves room for the engine\u2019s hint, so the label and the hint stay on one line', () => {
+    for (const cols of [36, 44, 56, 71, 72, 120]) {
+      for (const l of LANGS) {
+        for (const lines of [2, 3]) {
+          const drawn = layout(busyTree(), { ...UI, lang: l.code, compose: 'a1' }, { cols, rows: 40, now: NOW, frame: 0, animate: false })
+          const field = drawn.find(r => r.kind === 'input')
+          if (!field || field.kind !== 'input') throw new Error('no field')
+          const lead = width(`${field.label}: `)
+          const room = cols - lead
+          expect(field.room).toBe(room)
+          const pad = placeholderCells(cols, room, lines)
+          for (const form of ['shift+⏎', '\\⏎'] as const) {
+            // the label, the placeholder, the cursor's cell and the hint: within the pane
+            expect(lead + pad + 1 + hint(cols, room, lines, form) <= cols, `${l.code} ${cols} ${lines} ${form}`).toBe(true)
+          }
+          // still most of the line to click on
+          expect(pad >= Math.min(room, 8), `${l.code} ${cols}: ${pad}`).toBe(true)
+        }
+      }
+    }
+  })
+})
+

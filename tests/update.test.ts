@@ -10,6 +10,7 @@ import {
   switchedOff,
   updateCommand,
   updateRecordOf,
+  viaShell,
   versionParts,
 } from '../hooks/update'
 import type { UpdateHost, UpdateRecord } from '../hooks/update'
@@ -100,12 +101,25 @@ describe('the install', () => {
     // another plugin whose name only starts the same
     expect(findInstall(JSON.stringify([{ id: 'forge-agent-tree-lite@somewhere', version: '0.7.6', enabled: true }]))).toBeUndefined()
     expect(findInstall('not json')).toBeUndefined()
+    // a copy disabled here (a project install of another folder) listed before the enabled one: the enabled one (review of 2026-11-20)
+    expect(findInstall(JSON.stringify([{ id: ID, version: '0.0.9', scope: 'project', enabled: false }, { id: ID, version: '0.1.0', scope: 'user', enabled: true }]))).toEqual({ id: ID, version: '0.1.0', scope: 'user' })
     expect(findInstall(JSON.stringify({ plugins: [{ id: ID, version: '0.1.0' }] }))).toEqual({ id: ID, version: '0.1.0' })
   })
 
   test('the command names the install and its scope, and accepts nothing on its own (no -y)', () => {
     expect(updateCommand({ id: ID, version: '0.1.0', scope: 'project' })).toEqual(['claude', 'plugin', 'update', ID, '--scope', 'project'])
     expect(updateCommand({ id: ID, version: '0.1.0' })).toEqual(['claude', 'plugin', 'update', ID])
+  })
+
+  test('through cmd.exe (an npm install on Windows) only where cmd.exe reads every argument as itself', () => {
+    expect(viaShell(['claude', 'plugin', 'list', '--json'])).toEqual(['cmd.exe', '/d', '/c', 'claude', 'plugin', 'list', '--json'])
+    expect(viaShell(updateCommand({ id: ID, version: '0.1.0', scope: 'user' }))).toEqual(['cmd.exe', '/d', '/c', 'claude', 'plugin', 'update', ID, '--scope', 'user'])
+    // a marketplace's name never becomes a command
+    for (const bad of ['forge-agent-tree@x&calc', 'forge-agent-tree@x|more', 'a b', 'x^y', '%PATH%', '"q"', 'x>y', 'x<y', 'x!y', 'x(y)']) {
+      expect(viaShell(['claude', 'plugin', 'update', bad]), bad).toBeUndefined()
+    }
+    // only claude
+    expect(viaShell(['git', 'status'])).toBeUndefined()
   })
 })
 
@@ -135,6 +149,8 @@ describe('a check', () => {
     const w = host({ installed: '0.1.0', latest: '0.1.1', storeFails: true })
     expect(await checkForUpdate(w.h, NOW)).toEqual({ kind: 'later' })
     expect(w.runs).toEqual([])
+    // GitHub is not asked either: the time is kept before anything else (review of 2026-11-20)
+    expect(w.fetched()).toBe(0)
   })
 
   test('not installed from a marketplace: GitHub is not asked', async () => {
@@ -157,6 +173,8 @@ describe('a check', () => {
     const again = host({ record: { checkedAt: NOW, failed: '0.1.1' }, installed: '0.1.0', latest: '0.1.1' })
     expect(await checkForUpdate(again.h, NOW + CHECK_EVERY_MS)).toEqual({ kind: 'gaveUp', version: '0.1.1' })
     expect(again.runs).toEqual(['list'])
+    // the day's time kept, the version that failed still remembered (review of 2026-11-20)
+    expect(again.saved.at(-1)).toEqual({ checkedAt: NOW + CHECK_EVERY_MS, failed: '0.1.1' })
     // a later version is tried
     const later = host({ record: { checkedAt: NOW, failed: '0.1.1' }, installed: '0.1.0', latest: '0.1.2' })
     expect((await checkForUpdate(later.h, NOW + CHECK_EVERY_MS)).kind).toBe('updated')

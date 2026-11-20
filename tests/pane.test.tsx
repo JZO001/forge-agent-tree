@@ -75,6 +75,24 @@ type World = {
   update?: { id?: string; installed?: string; latest?: string; exit?: number }
   /** The plugin's folder, as `$.process.hookEnv()` names it (`CLAUDE_PLUGIN_ROOT`); none when not given. */
   pluginRoot?: string
+  /** The session is interactive (a terminal); `false` for a `claude -p` run. */
+  interactive?: boolean
+  /** How a sound player exits (0 played it). */
+  playerExit?: number
+  /** The server tools a model step used; an advisor call when not given. */
+  serverTools?: Array<{ id: string; name: string; input: Record<string, never>; startedAt: number; endedAt?: number }>
+  /** How /config keys the mod's options: `forge-agent-tree.` when not given. */
+  optionPrefix?: string
+  /** The mod's options /config lists unlocked (with the prefix), besides the locked ones. */
+  listedOptions?: string[]
+  /** /config refuses to set an option, for this reason. */
+  configRefuse?: string
+  /** How the Workflow tool answers: launched here in the background, unless the world says otherwise (`remote_launched`). */
+  workflowStatus?: string
+  /** No rate limits (an API key, a fresh install): no countdown in the pane. */
+  noLimits?: boolean
+  /** `claude` starts only through cmd.exe (an npm install's `claude.cmd` on Windows): run by itself it cannot start. */
+  claudeViaCmd?: boolean
 }
 
 
@@ -84,7 +102,7 @@ function usageOf(world: World, args: SessionUsageArgs | undefined): SessionUsage
   const usage: SessionUsage = {
     startedAt: T0,
     context: { window: 200_000, percent: world.percent, tokens: world.percent === undefined ? undefined : world.percent * 2000 },
-    rateLimits: [{ kind: 'five_hour', percentUsed: 23, resetsAt: new Date(T0 + 3 * 3_600_000).toISOString() }],
+    rateLimits: world.noLimits ? [] : [{ kind: 'five_hour', percentUsed: 23, resetsAt: new Date(T0 + 3 * 3_600_000).toISOString() }],
     cost: { usd: 0.42 },
   }
   if (args?.breakdown && world.estimate !== undefined) {
@@ -146,14 +164,18 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   // The `claude` command beneath, for the mod's own update: what it ran.
   const updates: string[] = []
   on('process.run', (_, e) => {
-    if (e.argv[0] === 'claude') {
+    const viaCmd = e.argv[0] === 'cmd.exe' && e.argv[1] === '/d' && e.argv[2] === '/c'
+    const argv = viaCmd ? e.argv.slice(3) : e.argv
+    if (argv[0] === 'claude') {
       updates.push(e.argv.join(' '))
+      // an npm install on Windows: `claude` alone is not found
+      if (world.claudeViaCmd && !viaCmd) throw new Error('spawn claude ENOENT')
       const u = world.update
-      if (e.argv[2] === 'list') {
+      if (argv[2] === 'list') {
         const id = u?.id ?? 'forge-agent-tree@forge-agent-tree'
         return ran(JSON.stringify(u?.installed === undefined ? [] : [{ id, version: u.installed, scope: 'user', enabled: true }]))
       }
-      if (e.argv[2] === 'update') {
+      if (argv[2] === 'update') {
         const code = u?.exit ?? 0
         if (u && code === 0 && u.latest !== undefined) u.installed = u.latest
         return ran('', code)
@@ -161,7 +183,7 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
       return ran('')
     }
     sounds.push(`run ${e.argv.join(' ')}`)
-    return ran('')
+    return ran('', world.playerExit ?? 0)
   })
   // GitHub beneath: the plugin.json of the repository's main branch.
   const fetched: string[] = []
@@ -178,13 +200,13 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
     value: [
       { key: 'model', label: 'Model', kind: 'choice' as const, value: world.modelSetting ?? 'opus', options: OFFER, provider: { plugin: 'engine', tier: 'core' as const }, isLocked: false },
       // the mod's own options, as /config lists them: `<plugin>.<field>`
-      ...(world.lockedOptions ?? []).map(field => ({
-        key: `forge-agent-tree.${field}`,
+      ...[...(world.lockedOptions ?? []), ...(world.listedOptions ?? [])].map(field => ({
+        key: `${world.optionPrefix ?? 'forge-agent-tree.'}${field}`,
         label: field,
         kind: 'boolean' as const,
         value: false,
         provider: { plugin: 'forge-agent-tree', tier: 'user' as const },
-        isLocked: true,
+        isLocked: (world.lockedOptions ?? []).includes(field),
       })),
     ],
   }))
@@ -192,6 +214,7 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   const configSets: Array<{ key: string; value: unknown }> = []
   on('config.set', (_, e) => {
     configSets.push({ key: e.key, value: e.value })
+    if (world.configRefuse) return { deny: world.configRefuse }
     return { value: e.value }
   })
   const toasts: string[] = []
@@ -208,7 +231,17 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   on('session.usage', (_, e) => ({ value: usageOf(world, e as SessionUsageArgs | undefined) }))
   on('agent.list', () => ({ value: agents }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  // The pane opened and closed beneath: what the mod asked for.
+  const opens: unknown[] = []
+  on('ui.open', (_, e) => {
+    opens.push(e)
+    return { value: { isPlaced: true } }
+  })
+  const closes: unknown[] = []
+  on('ui.close', (_, e) => {
+    closes.push(e)
+    return { value: undefined }
+  })
   on('ui.view', (_, e) => {
     viewed.push(e)
     return { value: {} }
@@ -222,11 +255,15 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   })
   const steps: Array<{ agentId?: string; effort?: unknown }> = []
   // The Workflow tool answers at once with the run it launched; any other tool with nothing.
-  on('tool.call', (_, e) => (String(e.tool) === 'Workflow' && world.workflow ? { result: { status: 'async_launched', ...world.workflow } as never } : { result: {} }))
+  on('tool.call', (_, e) => (String(e.tool) === 'Workflow' && world.workflow ? { result: { status: world.workflowStatus ?? 'async_launched', ...world.workflow } as never } : { result: {} }))
   // The main conversation takes in a prompt or a notification as it came.
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  // A reply's figures and a compaction, as the engine raises them after a response.
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.compact', (_, e) => ({ messages: e.messages }))
   const stepModels: Array<{ agentId?: string; model: string }> = []
   on('turn.step', async function* (_, e) {
     steps.push({ agentId: e.agentId, effort: e.effort })
@@ -236,12 +273,12 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
       index: e.index,
       answer: '',
       toolUses: [],
-      serverToolUses: [{ id: 's1', name: 'advisor', input: {}, startedAt: T0 + 100, endedAt: T0 + 4200 }],
+      serverToolUses: world.serverTools ?? [{ id: 's1', name: 'advisor', input: {}, startedAt: T0 + 100, endedAt: T0 + 4200 }],
       stopReason: 'end_turn' as const,
       usage: null,
     }
   })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: world.interactive ?? true })
   await $.agent.spawn({
     tool_use_id: 'tu1',
     prompt: 'find the auth handlers',
@@ -254,7 +291,7 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   })
   await $.tool.call({ tool: 'Grep', pattern: 'src/auth/**', agentId: 'a1' })
   await clock.advance(1000)
-  return { clock, viewed, stored, commands, toasts, spawns, steps, stepModels, sounds, sent, configSets, updates, fetched }
+  return { clock, viewed, stored, commands, toasts, spawns, steps, stepModels, sounds, sent, configSets, updates, fetched, opens, closes }
 }
 
 /** Waits, in real time, until `done` holds (the mod's update runs unawaited), or `ms` pass. */
@@ -743,7 +780,8 @@ test('a message from the pane: ✎ opens its panel at the foot, Enter sends it, 
   // the field is three lines, under the frame, its label before it; the hint is the frame's;
   // the field's placeholder is blank, as wide as the field, so a click anywhere on it reaches it
   const drawn = JSON.stringify(await ui.drawn())
-  expect(drawn).toContain(`"placeholder":"${' '.repeat(47)}"`)
+  // blank, the room after the label (47) less the engine's hint while focused (22) and the cursor's cell (the user's live check of 2026-11-20)
+  expect(drawn).toContain(`"placeholder":"${' '.repeat(24)}"`)
   expect(drawn).toContain('Type your message below')
   expect(drawn).toMatch(/"type":"Input","props":\{[^}]*"label":"message"/)
   expect(drawn).toMatch(/"type":"Input","props":\{[^}]*"rows":3/)
@@ -1238,5 +1276,381 @@ test('the options page switches Auto-update off as /config would', async ($, on)
   expect(await ui.find({ text: /^Auto-update +on$/ })).toBeDefined()
   await ui.press({ key: 'option:autoUpdate' })
   expect(configSets).toEqual([{ key: 'forge-agent-tree.autoUpdate', value: false }])
+  await ui.unmount()
+})
+
+// ── found in the review of 2026-11-20 ───────────────────────────────────
+
+test('a `claude -p` run: no pane, no sound, no update check', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', interactive: false, sysname: 'Darwin', update: { installed: '0.1.0', latest: '0.1.1' } }
+  const { clock, sounds, opens, updates, fetched } = await session($, on, [], world)
+  // an agent fails, a turn ends: an interactive session would sound them
+  await $.turn.complete({ answer: '', durationMs: 10, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'error' })
+  await clock.advance(1000)
+  await until(() => false, 150)
+  expect(opens).toEqual([])
+  expect(sounds).toEqual([])
+  expect(updates).toEqual([])
+  expect(fetched).toEqual([])
+})
+
+test('a subagent that fails at once still sounds its failure', { options: { soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
+  // spawned and failed within one tick
+  await spawn($)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
+  await clock.advance(500)
+  expect(sounds).toEqual(['play sounds/failed.wav'])
+})
+
+test('two at once: the more important sounds first, the other after it', { options: { soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
+  await $.turn.start({ text: 'go', turnId: 'm1' })
+  await clock.advance(500)
+  // the main turn ends as the explorer fails
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'error' })
+  await $.turn.complete({ answer: 'ok', durationMs: 900, isAborted: false, turnId: 'm1', reason: 'answer' })
+  await clock.advance(1500)
+  expect(sounds).toEqual(['play sounds/failed.wav', 'play sounds/turn.wav'])
+})
+
+test('a typed /advisor Claude Code refuses leaves the advisor as it stands', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', settings: { advisorModel: 'fable' }, noAdvisor: ['sonnet'] }
+  const { clock } = await session($, on, [], world)
+  await $.command.run({ command: 'advisor', args: 'sonnet', ...typed })
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /◆ ▾Fable advisor/ })).toBeDefined()
+  expect(await ui.find({ text: /◆ ▾sonnet/i })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a reload (a change of options) with the pane closed leaves it closed; with it shown, opens it again, booting nothing', { options: { hud: true } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' }
+  const { clock, opens, sounds } = await session($, on, [], world)
+  expect(opens).toHaveLength(1)
+  await clock.advance(3000)
+  // the person closed it; the options change and the plugin's start runs again
+  world.panes = []
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(500)
+  expect(opens).toHaveLength(1)
+  // shown again (`/tree`): a reload reopens it, so a new width applies, with no boot and no power-up
+  world.panes = [{ id: 'forge-tree', title: 'Agent Tree // Forge', isShown: true, isFocused: false, isPlaced: true }]
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(200)
+  expect(opens).toHaveLength(2)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^┌ CORE ┄+┐$/ })).toBeDefined()
+  await ui.unmount()
+  expect(sounds).toEqual(['play sounds/boot.wav'])
+})
+
+test('/tree close closes the pane and /tree opens it again, booting nothing the second time', { options: { hud: true } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' }
+  const { clock, opens, closes, sounds } = await session($, on, [], world)
+  await clock.advance(3000)
+  const closed = await $.command.run({ command: 'tree', args: 'close', ...typed })
+  expect(closes).toHaveLength(1)
+  expect(JSON.stringify(closes[0])).toContain('forge-tree')
+  expect(closed.text).toBe('Agent Tree // Forge closed.')
+  world.panes = []
+  const opened = await $.command.run({ command: 'tree', args: '', ...typed })
+  expect(opened.text).toBe('Agent Tree // Forge opened.')
+  expect(opens).toHaveLength(2)
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^┌ CORE ┄+┐$/ })).toBeDefined()
+  await ui.unmount()
+  expect(sounds).toEqual(['play sounds/boot.wav'])
+})
+
+test('a session swap is silent: what the new session already holds sounds nothing', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' }
+  const { clock, sounds } = await session($, on, [], world)
+  await clock.advance(500)
+  // the session in place after a /resume stands at its red mark already
+  world.id = 's2'
+  world.percent = 92
+  await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
+  await clock.advance(4000)
+  expect(sounds).toEqual(['play sounds/boot.wav'])
+})
+
+test('with Motion off nothing moves: an agent at work shows a still sign', { options: { animate: false } }, async ($, on) => {
+  const { clock } = await session($, on)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /[├└]─ ● Find auth handlers/ })).toBeDefined()
+  await ui.unmount()
+  await clock.advance(100)
+})
+
+test('reduced motion set while the session runs stops the motion within seconds', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5' }
+  const { clock } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /[├└]─ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Find auth handlers/ })).toBeDefined()
+  world.settings = { prefersReducedMotion: true }
+  await clock.advance(11_000)
+  expect(await ui.find({ text: /[├└]─ ● Find auth handlers/ })).toBeDefined()
+  await ui.unmount()
+})
+
+for (const name of ['DO_NOT_TRACK', 'DISABLE_AUTOUPDATER', 'DISABLE_UPDATES', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']) {
+  test(`${name} keeps the update check from running`, async ($, on) => {
+    const { updates, fetched } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', env: { [name]: '1' }, update: { installed: '0.1.0', latest: '0.1.1' } })
+    await until(() => false, 150)
+    expect(updates).toEqual([])
+    expect(fetched).toEqual([])
+  })
+}
+
+test('an option is set under the key /config lists for it; a refusal says why', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', optionPrefix: 'forge-agent-tree@mkt.', listedOptions: ['sound', 'advisorSound'], configRefuse: 'managed by a policy' }
+  const { clock, configSets, toasts } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'option:sound' })
+  await clock.advance(100)
+  expect(configSets).toEqual([{ key: 'forge-agent-tree@mkt.sound', value: false }])
+  expect(toasts.some(t => t.includes('managed by a policy'))).toBe(true)
+  await ui.unmount()
+})
+
+test('on Windows, a sound file that will not play beeps its tune instead', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', pluginRoot: 'C:\\plugins\\forge', playerExit: 1 })
+  await step($, undefined, 'high')
+  await clock.advance(500)
+  expect(sounds).toEqual([
+    "run powershell.exe -NoProfile -NonInteractive -Command (New-Object System.Media.SoundPlayer 'C:\\plugins\\forge\\sounds\\advisor.wav').PlaySync()",
+    'run powershell.exe -NoProfile -NonInteractive -Command [console]::beep(1319,70); [console]::beep(1976,90)',
+  ])
+})
+
+test('on Linux, where paplay does not play it, aplay does', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {
+  const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', pluginRoot: '/opt/forge', playerExit: 1 })
+  await step($, undefined, 'high')
+  await clock.advance(500)
+  expect(sounds).toEqual(['run paplay /opt/forge/sounds/advisor.wav', 'run aplay -q /opt/forge/sounds/advisor.wav'])
+})
+
+test('a server tool that is not the advisor is no advisor call', { options: { advisorSound: true, soundBoot: false } }, async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin', serverTools: [{ id: 'w1', name: 'web_search', input: {}, startedAt: T0 + 100, endedAt: T0 + 900 }] }
+  const { clock, sounds } = await session($, on, [], world)
+  await step($, undefined, 'high')
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /◆ × 1/ })).toBeUndefined()
+  expect(await ui.find({ text: /called by/ })).toBeUndefined()
+  expect(sounds).toEqual([])
+  await ui.unmount()
+})
+
+test('a reply’s figures reach the header: the context, the limits, the cost; a compaction is logged', async ($, on) => {
+  const { clock } = await session($, on)
+  await $.session.measure({
+    context: { window: 200_000, percent: 61, tokens: 122_000 },
+    rateLimits: [{ kind: 'seven_day', percentUsed: 70, resetsAt: new Date(T0 + 2 * 86_400_000).toISOString() }],
+    cost: { usd: 1.2 },
+    changed: ['context', 'rateLimits', 'cost'],
+  })
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^ctx .* 61%/ })).toBeDefined()
+  expect(await ui.find({ text: /^all .* 70%/ })).toBeDefined()
+  expect(await ui.find({ text: /≈\$1\.20/ })).toBeDefined()
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'the summary so far', toolUses: [] }] })
+  await clock.advance(500)
+  expect(await ui.find({ text: /context compacted/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the line above the prompt yields to a survey and to an agent’s transcript', async ($, on) => {
+  const { clock } = await session($, on)
+  await clock.advance(500)
+  const survey = await $.ui.mount({ ...band(100), props: { ...band(100).props, hasSurvey: true }, surface: 'terminal' })
+  expect(await survey.find({ text: /1 running/ })).toBeUndefined()
+  await survey.unmount()
+  const transcript = await $.ui.mount({ ...band(100), props: { ...band(100).props, view: { agentId: 'a1' } }, surface: 'terminal' })
+  expect(await transcript.find({ text: /1 running/ })).toBeUndefined()
+  await transcript.unmount()
+})
+
+test('a message delivered: its draft goes, and the field opens empty next time', async ($, on) => {
+  const { clock } = await session($, on)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'compose:a1' })
+  await ui.input({ key: 'message:a1', text: 'look in lib/ too', kind: 'change' })
+  await ui.input({ key: 'message:a1', text: 'look in lib/ too' })
+  await clock.advance(500)
+  await ui.press({ key: 'compose:a1' })
+  await clock.advance(500)
+  expect(await ui.find({ text: /✎ Message to/ })).toBeDefined()
+  expect(JSON.stringify(await ui.drawn())).not.toContain('look in lib/ too')
+  await ui.unmount()
+})
+
+test('a session starts with the log hidden when l was left off', async ($, on) => {
+  await session($, on, [], { id: 's1', model: 'claude-opus-5-5', store: { language: 'en', ui: { showLog: false, showFinished: false } } })
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /spawned · Haiku/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('with l left on, the log shows', async ($, on) => {
+  await session($, on, [], { id: 's1', model: 'claude-opus-5-5', store: { language: 'en', ui: { showLog: true, showFinished: false } } })
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /spawned · Haiku/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an agent’s own agent hangs under it', async ($, on) => {
+  const { clock } = await session($, on)
+  await $.agent.spawn({
+    tool_use_id: 'tu7',
+    prompt: 'check the routes',
+    description: 'Check routes',
+    subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-haiku-5-5',
+    background: false,
+    fork: false,
+    parentAgentId: 'a1',
+  })
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^└─ \S+ Find auth handlers/ })).toBeDefined()
+  expect(await ui.find({ text: /^ {3}└─ \S+ Check routes/ })).toBeDefined()
+  await ui.unmount()
+})
+
+kitTest('the HUD is the look when no option says otherwise (the manifest’s default)', async ($, on) => {
+  const { clock } = await session($, on)
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /^◢◤ AGENT TREE \/\/ FORGE/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the limit marks step by five: yellow up to 65, red down to 85', async ($, on) => {
+  const { clock, configSets } = await session($, on)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-options' })
+  await ui.press({ key: 'option:limitWarnAt:up' })
+  await ui.press({ key: 'option:limitAlertAt:down' })
+  await clock.advance(100)
+  expect(configSets).toEqual([
+    { key: 'forge-agent-tree.limitWarnAt', value: 65 },
+    { key: 'forge-agent-tree.limitAlertAt', value: 85 },
+  ])
+  await ui.unmount()
+})
+
+test('a workflow run launched elsewhere (remote_launched) has no row here', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', workflow: { runId: 'wf_remote', taskId: 'tk9', workflowName: 'far-away', summary: 'Runs in the cloud' }, workflowStatus: 'remote_launched' }
+  const { clock } = await session($, on, [], world)
+  await $.tool.call({ tool: 'Workflow', script: "export const meta = { name: 'far-away' }", tool_use_id: 'tu_far' })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ key: 'run:wf_remote' })).toBeUndefined()
+  expect(await ui.find({ text: /far-away/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('with Motion off the HUD’s log clock still turns its minute', { options: { animate: false, hud: true } }, async ($, on) => {
+  const { clock } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', noLimits: true })
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  const before = (await ui.find({ text: /^┌ LOG ┄+ \d\d:\d\d ┐$/ }))?.text
+  expect(before).toBeDefined()
+  await clock.advance(2 * 60_000)
+  const after = (await ui.find({ text: /^┌ LOG ┄+ \d\d:\d\d ┐$/ }))?.text
+  expect(after).toBeDefined()
+  expect(after).not.toBe(before)
+  await ui.unmount()
+})
+
+test('a workflow’s agents keep the script’s model though one is chosen for new subagents; a plain agent gets it', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', workflow: { runId: 'wf_r', taskId: 'tk1', workflowName: 'review-changes', summary: 'Review the diff' } }
+  const { clock, spawns } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'picker:agentModel' })
+  await ui.press({ key: 'choose:agentModel:sonnet' })
+  await clock.advance(100)
+  await $.tool.call({ tool: 'Workflow', script: "export const meta = { name: 'review-changes' }", tool_use_id: 'tu_wf' })
+  await member($, 'verify:auth.ts', 1)
+  await spawn($)
+  // (the test this guards passed with nothing chosen, so it could not tell: review of 2026-11-20)
+  expect(spawns.slice(1)).toEqual([
+    { model: 'haiku', fork: false },
+    { model: 'sonnet', fork: false },
+  ])
+  await ui.unmount()
+})
+
+test('a message with auto gives a new agent its own level back, over the effort chosen for new subagents', async ($, on) => {
+  const { clock, steps } = await session($, on)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'picker:agentEffort' })
+  await ui.press({ key: 'choose:agentEffort:low' })
+  await clock.advance(100)
+  // a new agent: its requests carry the chosen level
+  await spawn($)
+  await step($, 'a2', 'high')
+  expect(steps.at(-1)).toEqual({ agentId: 'a2', effort: 'low' })
+  await clock.advance(500)
+  // a message with auto: its own level from then on, the chosen one does not come back
+  await ui.press({ key: 'compose:a2' })
+  await ui.press({ key: 'choose:msgEffort:auto' })
+  await ui.input({ key: 'message:a2', text: 'as you were' })
+  await step($, 'a2', 'high')
+  await step($, 'a2', 'high')
+  expect(steps.slice(-2)).toEqual([
+    { agentId: 'a2', effort: 'high' },
+    { agentId: 'a2', effort: 'high' },
+  ])
+  await ui.unmount()
+})
+
+test('an npm install on Windows: claude starts through cmd.exe, the update too (the user’s choice of 2026-11-20)', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', claudeViaCmd: true, update: { installed: '0.1.0', latest: '0.1.1' } }
+  const { updates, toasts } = await session($, on, [], world)
+  await until(() => toasts.some(t => t.includes('0.1.1')))
+  const cmd = 'cmd.exe /d /c '
+  expect(updates).toEqual(['claude plugin list --json', `${cmd}claude plugin list --json`, `${cmd}${UPDATE}`, `${cmd}claude plugin list --json`])
+  expect(toasts).toContain('Agent Tree // Forge: updated to 0.1.1; /reload-plugins or a restart loads it')
+})
+
+test('elsewhere a claude that cannot start is no install: no cmd.exe, nothing more', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Linux', claudeViaCmd: true, update: { installed: '0.1.0', latest: '0.1.1' } }
+  const { updates, fetched, toasts } = await session($, on, [], world)
+  await until(() => updates.length > 0)
+  await until(() => false, 100)
+  expect(updates).toEqual(['claude plugin list --json'])
+  expect(fetched).toEqual([])
+  expect(toasts.some(t => t.includes('0.1.1'))).toBe(false)
+})
+
+test('through cmd.exe a marketplace name cmd.exe would read as a command is never run', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', sysname: 'Windows_NT', claudeViaCmd: true, update: { id: 'forge-agent-tree@evil&calc', installed: '0.1.0', latest: '0.1.1' } }
+  const { updates, toasts } = await session($, on, [], world)
+  await until(() => toasts.some(t => t.includes('0.1.1')))
+  // listed through cmd.exe, but the update itself not run
+  expect(updates.some(u => u.includes(' update '))).toBe(false)
+  expect(toasts.some(t => t.includes('could not update to 0.1.1'))).toBe(true)
+})
+
+test('with Motion off the countdown still moves, once a minute', { options: { animate: false } }, async ($, on) => {
+  const { clock } = await session($, on)
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  const before = (await ui.find({ text: /^session .* 23% .*in \dh\d\dm$/ }))?.text
+  expect(before).toBeDefined()
+  await clock.advance(3 * 60_000)
+  const after = (await ui.find({ text: /^session .* 23% .*in \dh\d\dm$/ }))?.text
+  expect(after).toBeDefined()
+  expect(after).not.toBe(before)
   await ui.unmount()
 })

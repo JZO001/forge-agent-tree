@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { activity, ago, at, duration, effortLevel, effortShort, modelEffort, modelName, seconds, tokenDelta, tokensFine, until, weatherFor, width, windowSize } from '../hooks/format'
+import { activity, ago, at, cut, duration, effortLevel, effortShort, modelEffort, modelName, seconds, tokenDelta, tokensFine, until, weatherFor, width, windowSize } from '../hooks/format'
 import { chooseLang, langOf, wordsFor } from '../hooks/words'
 import {
   MAX_AGENTS,
@@ -39,6 +39,8 @@ import {
   settleRuns,
   taskNotices,
   prompted,
+  runFailed,
+  withChoices,
 } from '../hooks/model'
 import { advisorFromUsage, advisorSet } from '../hooks/model'
 import type { ListedAgent } from '../hooks/model'
@@ -67,6 +69,30 @@ describe('format', () => {
     }
     // the two with no emoji form stay one cell
     expect([weatherFor(80).icon, weatherFor(95).icon]).toEqual(['☇', '↯'])
+  })
+
+  test('emoji take two cells, as Claude Code measures them; the pane’s own signs one (review of 2026-11-20)', () => {
+    // drawn as emoji by default
+    for (const e of ['✅', '❌', '⚡', '⭐', '⌛', '☕', '✨', '❓', '❗', '➕', '⬛', '🀄', '🆕', '🚀']) expect(width(e), e).toBe(2)
+    // a sign in its emoji form; a keycap
+    expect(width('⚠️')).toBe(2)
+    expect(width('✔️')).toBe(2)
+    expect(width('#️⃣')).toBe(2)
+    // one sign: a joined family, a skin tone, a flag
+    expect(width('👨‍👩‍👧')).toBe(2)
+    expect(width('👍🏽')).toBe(2)
+    expect(width('🇭🇺')).toBe(2)
+    // a joiner between letters joins nothing
+    expect(width('a‍b')).toBe(2)
+    // the pane's own signs stay one cell; wide scripts two; a combining mark none
+    for (const s of ['✓', '✗', '✎', '▣', '◆', '●', '‖', '■', '○', '◌', '⬢', '↯', '☇', '▾', '►', '▸', '⠹', '█', '▌']) expect(width(s), s).toBe(1)
+    expect(width('日本')).toBe(4)
+    expect(width('é')).toBe(1)
+    expect(width('echo "✅ tests passed"')).toBe(22)
+    // cut keeps within its cells, and keeps a sign whole
+    expect(cut('✅✅✅', 4)).toBe('✅…')
+    expect(width(cut('fix ❌ errors now', 7))).toBeLessThanOrEqual(7)
+    expect(cut('🇭🇺🇭🇺', 3)).toBe('🇭🇺…')
   })
 
   test('reads model ids and aliases', () => {
@@ -245,6 +271,13 @@ describe('the advisor', () => {
     const silent = listed(withAgent(), [row({ id: 'a1', model: 'claude-haiku-5-5', models: ['claude-fable-5-2'] })], T)
     expect(silent.advisor.model).toBeUndefined()
   })
+
+  test('a call keeps when it started, and when the pane learnt of it: the response brings it seconds later (review of 2026-11-20)', () => {
+    const s = stepped(emptyTree(T), { advisor: [{ startedAt: T, endedAt: T + 4000 }] }, T + 5000)
+    expect(s.advisor.calls[0]).toMatchObject({ at: T, seen: T + 5000 })
+    // the log keeps its time order by `at`; `seen` is when the pane heard of it
+    expect(s.log[0]).toMatchObject({ kind: 'advisor', at: T, seen: T + 5000 })
+  })
 })
 
 describe('remembered limits', () => {
@@ -412,6 +445,12 @@ describe('a pending session switch', () => {
     ])
     expect(pendingSettled(asked, { modelSetting: 'sonnet' }, T + LIMIT + 1, LIMIT).givenUp).toEqual([{ command: 'effort', value: 'high' }])
     expect(pendingSettled(undefined, {}, T, LIMIT)).toEqual({ modelDone: false, effortDone: false, advisorDone: false, givenUp: [] })
+  })
+
+  test('is not given up while Claude Code still holds its command (review of 2026-11-20)', () => {
+    // a long turn: the /model the pane ran waits for it to end, past the limit
+    expect(pendingSettled(asked, {}, T + LIMIT + 1, LIMIT, new Set(['model'])).givenUp).toEqual([{ command: 'effort', value: 'high' }])
+    expect(pendingSettled(asked, {}, T + LIMIT + 1, LIMIT, new Set(['model', 'effort'])).givenUp).toEqual([])
   })
 })
 
@@ -583,10 +622,26 @@ describe('the further European languages', () => {
     expect(wordsFor('el').date(10, 26)).toBe('26 Νοε')
   })
 
-  test('no Greek text uses the semicolon, the Greek question mark', () => {
-    const el = wordsFor('el')
-    const texts = [...Object.values(el.legend).flat(), el.agentModelNote, el.agentEffortNote, el.runModelNote, el.savedAsDefault, el.command.description, el.command.none, el.command.failed]
-    for (const t of texts) expect(String(t).includes(';'), String(t)).toBe(false)
+  test('no Greek text uses the semicolon, the Greek question mark: every word, and what every function writes', () => {
+    // A walk of all of it (review of 2026-11-20: the check read some ten fields; options, sounds, the update and the HUD came later).
+    const texts: string[] = []
+    const walk = (v: unknown, depth = 0): void => {
+      if (depth > 6) return
+      if (typeof v === 'string') texts.push(v)
+      else if (Array.isArray(v)) v.forEach(x => walk(x, depth + 1))
+      else if (typeof v === 'function') {
+        for (const args of [[2, 'x'], ['x', 'y'], [1], ['x']]) {
+          try {
+            walk((v as (...a: unknown[]) => unknown)(...args), depth + 1)
+          } catch {
+            // a function these arguments do not suit: the others try
+          }
+        }
+      } else if (v && typeof v === 'object') Object.values(v).forEach(x => walk(x, depth + 1))
+    }
+    walk(wordsFor('el'))
+    expect(texts.length > 200).toBe(true)
+    for (const t of texts) expect(t.includes(';'), t).toBe(false)
   })
 })
 
@@ -709,6 +764,47 @@ describe('workflow runs', () => {
     expect(noticed.log).toHaveLength(settled.log.length)
   })
 
+  test('a run taken as ended with a failed agent is a failed run; its notification still has the last word (review of 2026-11-20)', () => {
+    let s = member(launched(), 'm1', 'a:apple', T + 10)
+    s = turnCompleted(s, { agentId: 'm1', reason: 'error' }, T + 1000)
+    const settled = settleRuns(s, T + 1000 + RUN_SETTLE_MS)
+    expect(runFailed(settled, settled.runs![0]!)).toBe(true)
+    expect(settled.log[0]).toMatchObject({ kind: 'run', say: { phrase: 'failed' }, at: T + 1000, seen: T + 1000 + RUN_SETTLE_MS })
+    // its `end` stays open: a late notification still lands and says how it really ended
+    expect(settled.runs![0]!.end).toBeUndefined()
+    const noticed = runNoticed(settled, { taskId: 'ww4as3j67', status: 'completed' }, T + 300_000)
+    expect(noticed.runs![0]).toMatchObject({ end: 'completed' })
+    expect(runFailed(noticed, noticed.runs![0]!)).toBe(false)
+    // one whose agents all ended well is no failed run
+    const fine = settleRuns(turnCompleted(member(launched(), 'm1', 'a', T + 10), { agentId: 'm1', reason: 'answer' }, T + 1000), T + 1000 + RUN_SETTLE_MS)
+    expect(runFailed(fine, fine.runs![0]!)).toBe(false)
+    // a notification that says failed is a failed run, a stopped one is not
+    expect(runFailed(s, { ...s.runs![0]!, end: 'failed' })).toBe(true)
+    expect(runFailed(s, { ...s.runs![0]!, end: 'killed' })).toBe(false)
+  })
+
+  test('a run ending: the log row keeps its time, and when the pane learnt of it (review of 2026-11-20)', () => {
+    const s = member(launched(), 'm1', 'a:apple', T + 10)
+    const ended = runNoticed(s, { taskId: 'ww4as3j67', status: 'completed', durationMs: 2000 }, T + 9000)
+    expect(ended.log[0]).toMatchObject({ kind: 'run', at: T + 2000, seen: T + 9000 })
+  })
+
+  test('a description over several lines becomes one line: a row is one line (review of 2026-11-20)', () => {
+    const s = runLaunched(emptyTree(T), { runId: RUN, name: 'probe-a', about: 'Review the changes\n  across three dimensions\n' }, T)
+    expect(s.runs![0]!.about).toBe('Review the changes across three dimensions')
+    const again = runLaunched(s, { runId: RUN, about: 'Line one\r\nline two' }, T + 5)
+    expect(again.runs![0]!.about).toBe('Line one line two')
+  })
+
+  test("a run its agent's spawn opened hangs under the agent the Workflow tool's answer names (review of 2026-11-20)", () => {
+    const s = spawned(emptyTree(T), { agentId: 'm1', description: 'a:apple', type: 'workflow-subagent', workflow: true, run: RUN, toolUseId: 'toolu_wf' }, T)
+    expect(s.runs![0]!.parentId).toBeUndefined()
+    const named = runLaunched(s, { runId: RUN, name: 'probe-a', callerId: 'lead' }, T + 5)
+    expect(named.runs![0]!.parentId).toBe('lead')
+    // a caller already known stays
+    expect(runLaunched(named, { runId: RUN, callerId: 'other' }, T + 9).runs![0]!.parentId).toBe('lead')
+  })
+
   test('a resumed run (the same id, a new call) opens again', () => {
     const ended = runNoticed(launched(), { taskId: 'ww4as3j67', status: 'failed' }, T + 100)
     const again = runLaunched(ended, { runId: RUN, name: 'probe-a', taskId: 'n2', toolUseId: 'toolu_2' }, T + 200)
@@ -735,6 +831,27 @@ describe('workflow runs', () => {
     expect(adoptStrays(run, T + 10 * STRAY_MS).agents.find(a => a.id === 'f1')?.run).toBeUndefined()
     const ended = turnCompleted(s, { agentId: 'r1', reason: 'answer' }, T + 200)
     expect(adoptStrays(ended, T + 100 + STRAY_MS).agents.find(a => a.id === 'r1')?.run).toBeUndefined()
+  })
+
+  test('trimming drops only finished leaves, and lets go of what was chosen for them (review of 2026-11-20)', () => {
+    // the oldest: a running agent and a parent of a later one; then finished ones
+    let s = spawned(emptyTree(T), { agentId: 'run0', description: 'still at work', type: 'Explore' }, T)
+    s = spawned(s, { agentId: 'lead', description: 'lead', type: 'general-purpose' }, T + 1)
+    s = turnCompleted(s, { agentId: 'lead', reason: 'answer' }, T + 2)
+    s = spawned(s, { agentId: 'kid', parentId: 'lead', description: 'kid', type: 'Explore' }, T + 3)
+    s = withChoices(s, { pins: { f0: 'low', run0: 'high' }, exempt: ['f0', 'run0'], runModels: { f0: 'haiku', run0: 'sonnet' } })
+    for (let i = 0; i < MAX_AGENTS + 3; i++) {
+      s = spawned(s, { agentId: `f${i}`, description: `d${i}`, type: 'Explore' }, T + 10 + i)
+      s = turnCompleted(s, { agentId: `f${i}`, reason: 'answer' }, T + 1000 + i)
+    }
+    expect(s.agents.length).toBe(MAX_AGENTS)
+    const ids = new Set(s.agents.map(a => a.id))
+    expect(['run0', 'lead', 'kid'].every(id => ids.has(id))).toBe(true)
+    expect(ids.has('f0')).toBe(false)
+    // what was chosen for a dropped agent goes with it; the running one's stays
+    expect(s.choices?.pins).toEqual({ run0: 'high' })
+    expect(s.choices?.exempt).toEqual(['run0'])
+    expect(s.choices?.runModels).toEqual({ run0: 'sonnet' })
   })
 
   test('trimming keeps a run whole: the agents it loses stay in its counts', () => {

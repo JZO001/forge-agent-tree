@@ -11,7 +11,8 @@
 // $.config.set, as if set in /config. Otherwise every hook passes its event on
 // unchanged, and a fault in the mod passes it on unchanged too (.catch).
 //
-// Its sounds (sounds.ts, plan 09) play only with the Sound option on: macOS
+// Its sounds (sounds.ts, plan 09) play in an interactive session with the Sound
+// option on, and when ► on the sounds page is pressed to hear one: macOS
 // through $.audio.play, Windows through PowerShell, Linux through paplay or aplay.
 //
 // The one thing it does on its own is its update (update.ts, plan 07): with
@@ -21,14 +22,14 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, EngineInterface, Register, TextProps, Timer } from 'claude-code'
 
-import type { Lang, TreeLimit, TreeState, TreeUi } from '../types'
+import type { Lang, TreeLimit, TreeLook, TreeStart, TreeState, TreeUi } from '../types'
 import { EFFORT_LEVELS, LIMIT_THRESHOLDS, TITLE_TEXT, effortLevel, modelEffort } from './format'
 import type { LimitThresholds } from './format'
-import { ADVISOR_OFFER, BAND_GAP, DEFAULT_SETTINGS, OPTION_FIELDS, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen } from './layout'
+import { ADVISOR_OFFER, BAND_GAP, DEFAULT_SETTINGS, OPTION_FIELDS, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen, themeKind } from './layout'
 import type { Press, Row, Seg, Settings, ThemeKind } from './layout'
-import { SOUND_BEEPS, SOUND_OPTION, heardOf, pickSound, soundEvents, soundFile } from './sounds'
+import { SOUND_BEEPS, SOUND_OPTION, heardOf, nextSound, soundEvents, soundFile } from './sounds'
 import { BOOT_MS, EFFECT_MS, effectsEnd } from './hud'
-import type { Heard, SoundEvent } from './sounds'
+import type { Heard, SoundEvent, SoundQueue } from './sounds'
 import {
   anyActive,
   compacted,
@@ -68,7 +69,7 @@ import {
 import type { ListedAgent, PinBefore, RunFacts, SpawnFacts } from './model'
 import { NAME, chooseLang, isLang, wordsFor } from './words'
 import type { OptionField } from './words'
-import { UPDATE_KEY, checkForUpdate, switchedOff } from './update'
+import { UPDATE_KEY, checkForUpdate, switchedOff, viaShell } from './update'
 import type { UpdateHost } from './update'
 
 const PANE = 'forge-tree'
@@ -114,12 +115,18 @@ const treeRef = { plugin: 'forge-agent-tree', key: 'tree' } as const
 const uiRef = { plugin: 'forge-agent-tree', key: 'ui' } as const
 const frameRef = { plugin: 'forge-agent-tree', key: 'frame' } as const
 const paneRef = { plugin: 'forge-agent-tree', key: 'pane' } as const
+const lookRef = { plugin: 'forge-agent-tree', key: 'look' } as const
+const startRef = { plugin: 'forge-agent-tree', key: 'start' } as const
 
 const tree = atom(treeRef, emptyTree(0), { shape: TREE_SHAPE })
 const uiState = atom(uiRef, { showFinished: false, showLog: true, view: 'tree' } as TreeUi, { shape: 'ui-3' })
 const frameAtom = atom(frameRef, 0)
 /** Bumped whenever the pane opens or closes, so the line above the prompt draws again. */
 const paneAtom = atom(paneRef, 0)
+/** The theme, reduced motion and the options' locks the pane draws with: kept across a reload (the review of 2026-11-20). */
+const lookAtom = atom(lookRef, { theme: 'dark', reduced: false, locked: [] } as TreeLook, { shape: 'look-1' })
+/** What this process's start did: kept across a reload, carried over a session swap. */
+const startAtom = atom(startRef, {} as TreeStart, { shape: 'start-1' })
 
 /** The pane opened or closed: the line above the prompt looks again. */
 async function paneMoved($: EngineInterface): Promise<void> {
@@ -129,6 +136,8 @@ async function paneMoved($: EngineInterface): Promise<void> {
 // The module's own working copy: lost on a reload, rebuilt from $.state.
 let mem: TreeState | undefined
 let pending: Array<(s: TreeState) => TreeState> = []
+/** While another session's tree is being built (adopt), what comes in waits, then goes onto that tree. */
+let holding = false
 let dirty = false
 let lastFlush = 0
 let lastPoll = 0
@@ -149,12 +158,20 @@ let shimmering = false
 let lang: Lang = 'en'
 
 function change(fn: (s: TreeState) => TreeState): void {
-  if (mem) {
+  if (mem && !holding) {
     mem = fn(mem)
     dirty = true
   } else {
     pending.push(fn)
   }
+}
+
+/** What waited (before the boot, while a session swap built its tree) onto the tree in place. */
+function catchUp(): void {
+  if (!mem || pending.length === 0) return
+  for (const fn of pending) mem = fn(mem)
+  pending = []
+  dirty = true
 }
 
 /** Records an event beside its own work: nothing here is awaited before the event goes on. */
@@ -208,7 +225,8 @@ async function poll($: EngineInterface, now: number): Promise<void> {
   // A run with no notification and nothing at work for a while is taken as ended;
   // an agent no spawn named, seen while one run works, is that run's.
   const next = adoptStrays(settleRuns(listed(mem, list.map(fromInfo), now), now), now)
-  if (JSON.stringify([next.agents, next.runs]) !== before || next.log !== mem.log) {
+  // The advisor's model, learnt from an agent's usage, may be all that changed.
+  if (JSON.stringify([next.agents, next.runs]) !== before || next.log !== mem.log || next.advisor !== mem.advisor) {
     mem = next
     dirty = true
   }
@@ -221,7 +239,9 @@ async function tick($: EngineInterface): Promise<void> {
   const watching = watchSwapUntil > 0
   // A running effect of the HUD (a boot, an unfolding panel, an event's flash) draws live cells, so it keeps this going too.
   const idleShimmer = animate && shimmering
-  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && ticks % IDLE_TICKS !== 0) return
+  // A sound waiting its turn plays as soon as its turn comes, not at the idle pace.
+  const sounding = Object.keys(soundQueue).length > 0
+  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && !sounding && ticks % IDLE_TICKS !== 0) return
   ticking = true
   try {
     const now = await $.clock.now()
@@ -239,7 +259,8 @@ async function tick($: EngineInterface): Promise<void> {
     if (due && now - lastSettings >= SETTINGS_EVERY_MS) {
       lastSettings = now
       await readOffer($)
-      await readTheme($)
+      // The theme and reduced motion: a change draws the pane again (it reads them from $.state).
+      await readLook($)
       const advisor = await advisorSetting($)
       if (mem) {
         const next = advisorSet(mem, advisor)
@@ -251,12 +272,16 @@ async function tick($: EngineInterface): Promise<void> {
     }
     // Working, the spinner turns; idle, a countdown or an age still moves, once a minute.
     const clockText = mem !== undefined && (mem.advisor.calls.length > 0 || (mem.main.limits ?? []).some(l => l.resetsAt))
+    // The HUD's log rail shows the time: with motion off, its minute turns as the clock's does.
+    const minuteTurned = current.hud !== false && Math.floor(now / 60_000) !== Math.floor(lastClockRedraw / 60_000)
     // While an event's effect runs (the HUD's motion), every frame, so it does not wait for the idle pace.
     const effects = mem !== undefined && current.hud !== false ? Math.max(effectsEnd(mem), (bootAt ?? 0) + BOOT_MS.reveal, (panelAt ?? 0) + EFFECT_MS.unfold) : 0
     const redraw =
       mem !== undefined && anyActive(mem)
         ? animate || ticks % SLOW_TICKS === 0
-        : (animate && now < effects) || (idleShimmer && ticks % IDLE_SHIMMER_TICKS === 0) || (due && clockText && now - lastClockRedraw >= CLOCK_REDRAW_MS)
+        : (animate && now < effects) ||
+          (idleShimmer && ticks % IDLE_SHIMMER_TICKS === 0) ||
+          (due && ((clockText && now - lastClockRedraw >= CLOCK_REDRAW_MS) || minuteTurned))
     if (redraw) {
       lastClockRedraw = now
       frame = (frame + 1) % 1000
@@ -280,36 +305,46 @@ async function adopt($: EngineInterface, now: number): Promise<void> {
   const id = await $.session.id().catch(() => undefined)
   if (!mem || id === undefined || id === mem.sessionId) return
   const before = mem
-  const stored = await read($, tree).catch(() => undefined)
-  const model = await $.session.model().catch(() => undefined)
-  const advisor = await advisorSetting($)
-  const effort = await configuredEffort($, model ?? before.main.model)
-  const list = await $.agent.list().catch(() => [] as AgentInfo[])
-  // Events noted during these calls went to the old tree; the list catches the new one up.
-  const base = stored && stored.startedAt > 0 && stored.sessionId === id ? stored : emptyTree(now)
-  let s = advisorSet(configured(orphaned(base, new Set(list.map(a => a.id)), now), { model, effort }), advisor)
-  s = {
-    ...s,
-    sessionId: id,
-    main: {
-      ...s.main,
-      model: s.main.model ?? before.main.model,
-      effort: s.main.effort ?? before.main.effort,
-      // The plan's limits are the account's, not the session's: they carry over.
-      limits: s.main.limits ?? before.main.limits,
-      limitsEstimated: s.main.limits ? s.main.limitsEstimated : before.main.limitsEstimated,
-    },
+  // What comes in while the new tree is built is the new session's: it waits, then goes onto that tree.
+  holding = true
+  try {
+    const stored = await read($, tree).catch(() => undefined)
+    const model = await $.session.model().catch(() => undefined)
+    const advisor = await advisorSetting($)
+    const effort = await configuredEffort($, model ?? before.main.model)
+    const list = await $.agent.list().catch(() => [] as AgentInfo[])
+    const base = stored && stored.startedAt > 0 && stored.sessionId === id ? stored : emptyTree(now)
+    let s = advisorSet(configured(orphaned(base, new Set(list.map(a => a.id)), now), { model, effort }), advisor)
+    s = {
+      ...s,
+      sessionId: id,
+      main: {
+        ...s.main,
+        model: s.main.model ?? before.main.model,
+        effort: s.main.effort ?? before.main.effort,
+        // The plan's limits are the account's, not the session's: they carry over.
+        limits: s.main.limits ?? before.main.limits,
+        limitsEstimated: s.main.limits ? s.main.limitsEstimated : before.main.limitsEstimated,
+      },
+    }
+    mem = listed(s, list.map(fromInfo), now)
+  } finally {
+    holding = false
+    catchUp()
   }
-  mem = listed(s, list.map(fromInfo), now)
-  // What the new session already holds sounds nothing.
+  // What the new session already holds sounds nothing; what the old one raised and did not play, neither.
   heard = undefined
+  soundQueue = {}
   watchSwapUntil = 0
   dirty = true
+  // The new session's $.state is empty: what this process's start did goes along.
+  await keepStart($)
   await readContext($, now).catch(() => undefined)
   await readOffer($)
   await readLocks($)
-  // A change of options reloads the plugin, and this runs again: the page's locks and keys, fresh.
+  // The options page's locks and keys, and the look, into the new session's state.
   await readOptionLocks($).catch(() => undefined)
+  await readLook($)
   await restoreRecord($)
   await flush($, now, true)
   await restorePrefs($)
@@ -451,8 +486,9 @@ async function advisorModel($: EngineInterface): Promise<string | undefined> {
   const saved = await $.settings.read({ key: 'advisorModel' }).catch(() => undefined)
   if (typeof saved === 'string' && saved) return saved
   // `--advisor` is not saved to settings; the config menu may still show it.
+  // Claude Code's own row: no plugin's option (`forge-agent-tree.advisorSound`, another's string).
   const rows = await $.config.list().catch(() => [])
-  const row = rows.find(r => /advisor/i.test(r.key))
+  const row = rows.find(r => !r.key.includes('.') && r.provider?.plugin === undefined && /advisor/i.test(r.key))
   const value = row?.value
   return typeof value === 'string' && value && !/^(off|none|false)$/i.test(value) ? value : undefined
 }
@@ -484,14 +520,26 @@ let pluginRoot: string | null | undefined
 const lastSounds: Record<string, number> = {}
 /** What the sounds last heard of the session, to tell what changed (sounds.ts). */
 let heard: Heard | undefined
-/** The power-up sounds once a process, at the pane's first opening. */
+/** The sounds raised and waiting their turn (sounds.ts). */
+let soundQueue: SoundQueue = {}
+/** Whether the session is interactive: a `claude -p` run sounds nothing (the review of 2026-11-20). */
+let interactive = false
+/** The power-up sounds once a process, at the pane's first opening; kept across a reload ($.state `start`). */
 let poweredUp = false
+/** The pane was opened at this process's start (`openOnStart`), or that was decided: a reload does not open it again. */
+let startedOpen = false
 /** When the HUD's boot sequence started (plan 08, F3): the pane's first opening in the process, with motion on. */
 let bootAt: number | undefined
 /** When a panel last opened: the HUD unfolds it (F2). */
 let panelAt: number | undefined
 
-/** Whether an event sounds: the Sound option on (off by default), and the event's own (on by default). */
+/** What this process's start did, into the session's state: a reload reads it back, a session swap carries it over. */
+async function keepStart($: EngineInterface): Promise<void> {
+  const value: TreeStart = { opened: startedOpen || undefined, poweredUp: poweredUp || undefined }
+  await update($, startAtom, () => value).catch(() => undefined)
+}
+
+/** Whether an event sounds: the Sound option on (on by default), and the event's own (on by default, but the advisor's call and a new agent's). */
 function soundOn(options: Options, event: SoundEvent): boolean {
   return flagOf(options, 'sound') && flagOf(options, SOUND_OPTION[event])
 }
@@ -508,6 +556,12 @@ async function rootOf($: EngineInterface): Promise<string | null> {
   return pluginRoot
 }
 
+/** The system the session runs on, read once (`Darwin`, `Windows_NT`, `Linux`; empty where it could not be read). */
+async function systemOf($: EngineInterface): Promise<string> {
+  sysname ??= (await $.session.machine().catch(() => undefined))?.sysname ?? ''
+  return sysname
+}
+
 /**
  * Plays an event's sound (plan 09). macOS through the engine's player; a
  * Windows terminal has none, so PowerShell plays the file (its SoundPlayer),
@@ -515,7 +569,7 @@ async function rootOf($: EngineInterface): Promise<string | null> {
  * is awaited by what raised it.
  */
 async function playSound($: EngineInterface, event: SoundEvent): Promise<void> {
-  sysname ??= (await $.session.machine().catch(() => undefined))?.sysname ?? ''
+  const sysname = await systemOf($)
   if (sysname === 'Darwin') {
     await $.audio.play({ asset: soundFile(event) }).catch(() => undefined)
     return
@@ -540,14 +594,20 @@ async function playSound($: EngineInterface, event: SoundEvent): Promise<void> {
   }
 }
 
-/** The events the last change of state raised (sounds.ts): the one that sounds now, unawaited. */
+/**
+ * The events the last change of state raised (sounds.ts): they wait their
+ * turn, and the one whose turn it is sounds now, unawaited. Only in an
+ * interactive session.
+ */
 function listen($: EngineInterface, now: number): void {
   if (!mem) return
   const thresholds = thresholdsOf(current)
   const before = heard
-  heard = heardOf(mem, thresholds)
-  if (!before) return
-  const event = pickSound(soundEvents(before, mem, thresholds), e => soundOn(current, e), lastSounds, now)
+  heard = heardOf(mem, thresholds, now)
+  if (!before || !interactive) return
+  const next = nextSound(soundQueue, soundEvents(before, mem, thresholds), e => soundOn(current, e), lastSounds, now)
+  soundQueue = next.queue
+  const event = next.play
   if (!event) return
   lastSounds[event] = now
   lastSounds.any = now
@@ -560,20 +620,42 @@ async function startBoot($: EngineInterface, options: Options): Promise<void> {
   bootAt = await $.clock.now().catch(() => undefined)
 }
 
-/** The power-up, at the pane's first opening in this process. */
+/** The power-up, at the pane's first opening in this process (a reload keeps that it was). */
 function powerUp($: EngineInterface, options: Options): void {
   if (poweredUp) return
   poweredUp = true
-  if (soundOn(options, 'boot')) void playSound($, 'boot').catch(() => undefined)
+  void keepStart($)
+  if (interactive && soundOn(options, 'boot')) void playSound($, 'boot').catch(() => undefined)
 }
 
 /** Claude Code's theme as the HUD reads it: a dark one, a light one, or one of ANSI colors only. */
 let theme: ThemeKind = 'dark'
+/** Claude Code's `prefersReducedMotion`: every motion off, as the Motion option does. */
+let reduced = false
 
-async function readTheme($: EngineInterface): Promise<void> {
-  const value = await $.settings.read({ key: 'theme' }).catch(() => undefined)
-  const t = typeof value === 'string' ? value.toLowerCase() : ''
-  theme = t.includes('ansi') ? 'ansi' : t.startsWith('light') ? 'light' : 'dark'
+/** Whether the pane moves: the Motion option, unless Claude Code asks for reduced motion. */
+function motionOf(options: Options, look: { reduced: boolean } = { reduced }): boolean {
+  return options.animate !== false && !look.reduced
+}
+
+/**
+ * The theme and reduced motion, read again (at the start and every 10 s):
+ * into the module for the ticker, and into $.state for the pane, which draws
+ * again when they change, and keeps them across a reload.
+ */
+async function readLook($: EngineInterface): Promise<void> {
+  theme = themeKind(await $.settings.read({ key: 'theme' }).catch(() => undefined))
+  reduced = (await $.settings.read({ key: 'prefersReducedMotion' }).catch(() => undefined)) === true
+  animate = motionOf(current)
+  await keepLook($)
+}
+
+/** The look as the module holds it, into $.state where it changed. */
+async function keepLook($: EngineInterface): Promise<void> {
+  const value: TreeLook = { theme, reduced, locked: [...lockedOptions] }
+  const was = await read($, lookAtom).catch(() => undefined)
+  if (was && JSON.stringify(was) === JSON.stringify(value)) return
+  await update($, lookAtom, () => value).catch(() => undefined)
 }
 
 /**
@@ -592,18 +674,37 @@ async function autoUpdate($: EngineInterface, isInteractive: boolean, options: O
     await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC').catch(() => undefined),
   ]
   if (switchedOff(off)) return
+  // How `claude` starts here: by itself, or through cmd.exe (Windows, an npm install's
+  // `claude.cmd`). The first, read-only command finds out; the update runs with what worked.
+  let shell = false
+  const claude = (argv: readonly string[]): string[] => {
+    if (!shell) return [...argv]
+    const through = viaShell(argv)
+    if (!through) throw new Error('an argument cmd.exe would not read as itself')
+    return through
+  }
+  const list = ['claude', 'plugin', 'list', '--json']
   const host: UpdateHost = {
     load: () => $.store.get(UPDATE_KEY),
     save: async record => {
       await $.store.set(UPDATE_KEY, record)
     },
-    list: async () => (await $.process.run(['claude', 'plugin', 'list', '--json'], { timeoutMs: 30_000 })).stdout,
+    list: async () => {
+      try {
+        return (await $.process.run(claude(list), { timeoutMs: 30_000 })).stdout
+      } catch (err) {
+        // `claude` would not start: on Windows once more through cmd.exe (the list only reads).
+        if (shell || !(await systemOf($)).startsWith('Windows')) throw err
+        shell = true
+        return (await $.process.run(claude(list), { timeoutMs: 30_000 })).stdout
+      }
+    },
     // The one request the mod makes: the repository's plugin.json, for its version.
     manifest: async () => {
       const answer = await $.http.fetch('https://raw.githubusercontent.com/JZO001/forge-agent-tree/main/.claude-plugin/plugin.json')
       return answer.ok ? answer.text : undefined
     },
-    run: async argv => (await $.process.run(argv, { timeoutMs: 120_000 })).exitCode,
+    run: async argv => (await $.process.run(claude(argv), { timeoutMs: 120_000 })).exitCode,
   }
   const result = await checkForUpdate(host, await $.clock.now())
   const w = wordsFor(lang)
@@ -626,10 +727,12 @@ async function readOptionLocks($: EngineInterface): Promise<void> {
   }
   optionKeys = keys
   lockedOptions = locked
+  // The page draws the locks from $.state: right after a reload too.
+  await keepLook($)
 }
 
-/** The options as in effect, for the options page. */
-function settingsOf(options: Options): Settings {
+/** The options as in effect, for the options page; the locks as the pane last read them. */
+function settingsOf(options: Options, locked: readonly string[] = lockedOptions): Settings {
   const t = thresholdsOf(options)
   // A switch as set, else its default.
   const flag = (f: OptionField): boolean => flagOf(options, f)
@@ -654,7 +757,7 @@ function settingsOf(options: Options): Settings {
       soundBoot: flag('soundBoot'),
       autoUpdate: flag('autoUpdate'),
     },
-    locked: lockedOptions,
+    locked: OPTION_FIELDS.filter(f => locked.includes(f)),
   }
 }
 
@@ -685,21 +788,32 @@ function columnsOf(options: Options): number {
 }
 
 async function boot($: EngineInterface, isInteractive: boolean, options: Options): Promise<void> {
+  interactive = isInteractive
   const now = await $.clock.now()
   const stored = await read($, tree).catch(() => undefined)
-  const model = await $.session.model().catch(() => undefined)
-  const advisor = await advisorSetting($)
-  const effort = await configuredEffort($, model)
-  const reduced =await $.settings.read({ key: 'prefersReducedMotion' }).catch(() => undefined)
   const sessionId = await $.session.id().catch(() => undefined)
-  animate = options.animate !== false && reduced !== true
-  // No await between taking what queued up and installing the copy.
+  // The copy goes in place as soon as it can (the review of 2026-11-20): until
+  // then a subagent's spawn and requests found no choices to apply. No await
+  // between taking what queued up and installing it.
   let s = stored && stored.startedAt > 0 && (stored.sessionId === undefined || stored.sessionId === sessionId) ? stored : emptyTree(now)
   for (const fn of pending) s = fn(s)
   pending = []
-  mem = { ...advisorSet(configured(s, { model, effort }), advisor), sessionId }
-  lastSettings = now
+  mem = { ...s, sessionId }
   dirty = true
+  // The locks as the last load read them, until they are read again below.
+  const look = await read($, lookAtom).catch(() => undefined)
+  lockedOptions = OPTION_FIELDS.filter(f => look?.locked.includes(f) === true)
+  const model = await $.session.model().catch(() => undefined)
+  const advisor = await advisorSetting($)
+  const effort = await configuredEffort($, model)
+  change(t => advisorSet(configured(t, { model, effort }), advisor))
+  // The theme and reduced motion (and so the motion), before anything is drawn from them.
+  await readLook($)
+  // A change of options reloads the plugin and this runs again: what this process's start already did stays done.
+  const begun = await read($, startAtom).catch(() => undefined)
+  startedOpen ||= begun?.opened === true
+  poweredUp ||= begun?.poweredUp === true
+  lastSettings = now
   await readContext($, now).catch(() => undefined)
   await readOffer($)
   await readLocks($)
@@ -712,26 +826,34 @@ async function boot($: EngineInterface, isInteractive: boolean, options: Options
 
   lang = await readLang($)
   await restorePrefs($)
-  await readTheme($)
   // What the session already holds when the mod starts sounds nothing.
-  heard = heardOf(mem, thresholdsOf(options))
+  heard = heardOf(mem, thresholdsOf(options), now)
 
   commandName = await registerCommand($)
-  if (isInteractive && options.openOnStart !== false) {
-    // A change of options reloads the plugin and this runs again with the pane
-    // already open: the power-up sounds only for a pane that was not.
+  if (isInteractive) {
     const before = await $.ui.panes().catch(() => [])
-    const wasOpen = before.some(p => p.id === PANE && p.isShown)
-    if (!wasOpen) await startBoot($, options)
-    void $.ui
-      .open({ id: PANE, title: TITLE, columns: columnsOf(options) })
-      .then(opened => {
-        if (opened.isPlaced && !wasOpen) powerUp($, options)
-        // Not placed: no boot is under way; the next opening boots.
-        if (!opened.isPlaced && !poweredUp) bootAt = undefined
-        return paneMoved($)
-      })
-      .catch(() => undefined)
+    const pane = before.find(p => p.id === PANE)
+    const shown = pane?.isShown === true
+    // Seen: shown and placed. A pane opened unasked that waits for room has not been seen yet.
+    const seen = shown && pane?.isPlaced === true
+    // Opened at the process's start only (openOnStart). A reload (a change of
+    // options) opens it again only where it shows, so a new width applies; one
+    // the person closed stays closed (the review of 2026-11-20).
+    if (shown || (!startedOpen && options.openOnStart !== false)) {
+      // The power-up and the boot only for a pane not seen before.
+      if (!seen) await startBoot($, options)
+      void $.ui
+        .open({ id: PANE, title: TITLE, columns: columnsOf(options) })
+        .then(opened => {
+          if (opened.isPlaced && !seen) powerUp($, options)
+          // Not placed: no boot is under way; the next opening boots.
+          if (!opened.isPlaced && !poweredUp) bootAt = undefined
+          return paneMoved($)
+        })
+        .catch(() => undefined)
+    }
+    startedOpen = true
+    await keepStart($)
   }
 
   ticker?.cancel()
@@ -744,16 +866,21 @@ async function treeCommand($: EngineInterface, args: string, options: Options): 
   const word = args.trim().toLowerCase()
   if (word === 'close' || word === 'off' || word === 'hide') {
     await $.ui.close({ id: PANE }).catch(() => undefined)
+    // Closed, it draws nothing more: the idle pace stops until it is drawn again.
+    // The mod's own close does not reach its ui.close hook (re-entry).
+    shimmering = false
     await paneMoved($)
     return { text: wordsFor(lang).command.closed }
   }
   const before = await $.ui.panes().catch(() => [])
-  const wasOpen = before.some(p => p.id === PANE && p.isShown)
-  if (!wasOpen) await startBoot($, options)
+  const pane = before.find(p => p.id === PANE)
+  // Seen: shown and placed; a pane that waited for room is seen first now.
+  const seen = pane?.isShown === true && pane.isPlaced === true
+  if (!seen) await startBoot($, options)
   const opened = await $.ui
     .open({ id: PANE, title: TITLE, columns: columnsOf(options), focus: true })
     .catch((err: unknown) => ({ isPlaced: false as const, reason: String(err) }))
-  if (opened.isPlaced && !wasOpen) powerUp($, options)
+  if (opened.isPlaced && !seen) powerUp($, options)
   if (!opened.isPlaced && !poweredUp) bootAt = undefined
   await paneMoved($)
   const said = wordsFor(lang).command
@@ -818,6 +945,8 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
     }
     case 'option': {
       // As the /config menu would: the engine writes it, and the plugin reloads with it.
+      // What the tree holds goes into $.state first: the reload starts from there.
+      await flush($, await $.clock.now(), true)
       const key = optionKeys[press.field] ?? `${PLUGIN}.${press.field}`
       const result = await $.config.set({ key, value: press.value }).catch((err: unknown) => ({ deny: String(err) }))
       const deny = (result as { deny?: string }).deny
@@ -898,6 +1027,17 @@ async function chooseRun($: EngineInterface, agentId: string, value: string): Pr
 
 /** What the person has typed into the message panel, by agent: kept while the panel is closed. */
 const drafts = new Map<string, string>()
+/** The drafts kept: the latest typed this many, so a long session's do not pile up. */
+const DRAFTS_KEPT = 20
+
+function keepDraft(agentId: string, text: string): void {
+  drafts.delete(agentId)
+  drafts.set(agentId, text)
+  for (const oldest of drafts.keys()) {
+    if (drafts.size <= DRAFTS_KEPT) break
+    drafts.delete(oldest)
+  }
+}
 /** The text the message field starts from when its panel opens; held while it is open, so a redraw never undoes typing. */
 let composeValue: string | undefined
 
@@ -929,7 +1069,7 @@ async function sendMessage($: EngineInterface, agentId: string, text: string): P
     const back = before
     if (back) change(s => withChoices(s, pinBack(s.choices, agentId, back)))
     // The text stays in the field, a redraw included.
-    drafts.set(agentId, text)
+    keepDraft(agentId, text)
     composeValue = text
     $.ui.toast(wordsFor(lang).messageFailed(sent.reason ?? '?'))
     await flush($, await $.clock.now(), true)
@@ -1061,42 +1201,66 @@ async function readOffer($: EngineInterface): Promise<void> {
  * default for new sessions. Until it has taken effect the header shows it
  * pending (`→ Sonnet`); a command that does not run says so in a toast.
  */
-async function switchMain($: EngineInterface, command: 'model' | 'effort' | 'advisor', value: string): Promise<void> {
+type Switch = 'model' | 'effort' | 'advisor'
+
+/** The pending field of each switch. */
+const PENDING_FIELD = { model: 'pendingModel', effort: 'pendingEffort', advisor: 'pendingAdvisor' } as const satisfies Record<Switch, keyof NonNullable<TreeState['choices']>>
+
+/** The switches whose command has not answered yet: Claude Code holds it until it is idle, so none is given up meanwhile. */
+const asking: Record<Switch, number> = { model: 0, effort: 0, advisor: 0 }
+
+/** No longer pending: unless a later pick of the same switch has taken its place (the review of 2026-11-20). */
+function unpend(s: TreeState, command: Switch, value: string): TreeState {
+  const field = PENDING_FIELD[command]
+  return s.choices?.[field] === value ? withChoices(s, { [field]: undefined }) : s
+}
+
+async function switchMain($: EngineInterface, command: Switch, value: string): Promise<void> {
   const now = await $.clock.now()
-  const field = command === 'model' ? 'pendingModel' : command === 'effort' ? 'pendingEffort' : 'pendingAdvisor'
+  const field = PENDING_FIELD[command]
   await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, picker: undefined }))
   change(s => withChoices(s, { [field]: value, pendingSince: now }))
   await flush($, now, true)
-  const answer = await $.command.run({ command, args: value }).then(
-    r => ({ ran: true, text: r.text }),
-    () => ({ ran: false, text: undefined }),
-  )
+  asking[command] += 1
+  const answer = await $.command
+    .run({ command, args: value })
+    .then(
+      r => ({ ran: true, text: r.text }),
+      () => ({ ran: false, text: undefined }),
+    )
+    .finally(() => {
+      asking[command] -= 1
+    })
   if (!answer.ran) {
-    change(s => withChoices(s, { [field]: undefined }))
+    change(s => unpend(s, command, value))
     $.ui.toast(wordsFor(lang).switchFailed(command, value))
   } else if (answer.text && LANDED[command].test(answer.text)) {
     // Its own answer says it took effect: shown now, whatever the settings read back.
     await landed($, command, value)
   } else if (answer.text && REFUSED.test(answer.text)) {
     // It ran, and said why it changed nothing (`opus can't be used as an advisor`).
-    change(s => withChoices(s, { [field]: undefined }))
+    change(s => unpend(s, command, value))
     $.ui.toast(wordsFor(lang).said(answer.text.split('\n')[0] ?? answer.text))
+  } else {
+    // It ran at last and said nothing that tells: the read-back has its time from now.
+    const ran = await $.clock.now()
+    change(s => (s.choices?.[field] === value ? withChoices(s, { pendingSince: ran }) : s))
   }
   await settle($)
   await flush($, await $.clock.now(), true)
 }
 
 /** A switch the command's own answer says took effect: no longer pending, the header shows it. */
-async function landed($: EngineInterface, command: 'model' | 'effort' | 'advisor', value: string): Promise<void> {
+async function landed($: EngineInterface, command: Switch, value: string): Promise<void> {
   if (command === 'model') {
     const model = await $.session.model().catch(() => undefined)
     const effort = await configuredEffort($, model)
     await readOffer($)
-    change(s => withChoices(mainChanged(s, { model, effort }), { pendingModel: undefined }))
+    change(s => unpend(mainChanged(s, { model, effort }), command, value))
   } else if (command === 'effort') {
-    change(s => withChoices(mainChanged(s, { effort: value }), { pendingEffort: undefined }))
+    change(s => unpend(mainChanged(s, { effort: value }), command, value))
   } else {
-    change(s => withChoices(advisorSet(s, value === 'off' ? { off: true } : { model: value }), { pendingAdvisor: undefined }))
+    change(s => unpend(advisorSet(s, value === 'off' ? { off: true } : { model: value }), command, value))
   }
 }
 
@@ -1117,11 +1281,14 @@ async function settle($: EngineInterface): Promise<void> {
   const advisor = typeof saved === 'string' && saved ? saved : null
   const c = mem.choices ?? {}
   const shown = mem.main.effort
+  // A command Claude Code still holds (it runs a queued one when idle) may yet land: none of those is given up.
+  const held = new Set((['model', 'effort', 'advisor'] as const).filter(k => asking[k] > 0))
   const verdict = pendingSettled(
     c,
     { modelSetting: c.modelSetting, modelAlias: aliasOf(model), effortSaved: effort, effortShown: typeof shown === 'string' ? shown : undefined, advisor },
     now,
     PENDING_MS,
+    held,
   )
   if (verdict.advisorDone) {
     change(s => withChoices(advisorSet(s, advisor === null ? { off: true } : { model: advisor }), { pendingAdvisor: undefined }))
@@ -1129,10 +1296,12 @@ async function settle($: EngineInterface): Promise<void> {
   if (verdict.modelDone) change(s => withChoices(mainChanged(s, { model, effort }), { pendingModel: undefined }))
   const landed = c.pendingEffort
   if (verdict.effortDone) change(s => withChoices(mainChanged(s, { effort: landed }), { pendingEffort: undefined }))
-  if (verdict.givenUp.length > 0) {
+  // Given up: only it, not a later pick of the same switch nor another switch still pending.
+  const givenUp = verdict.givenUp
+  if (givenUp.length > 0) {
     const w = wordsFor(lang)
-    for (const g of verdict.givenUp) $.ui.toast(w.notApplied(g.command, g.value))
-    change(s => withChoices(s, { pendingModel: undefined, pendingEffort: undefined, pendingAdvisor: undefined, pendingSince: undefined }))
+    for (const g of givenUp) $.ui.toast(w.notApplied(g.command, g.value))
+    change(s => givenUp.reduce((t, g) => unpend(t, g.command, g.value), s))
   }
 }
 
@@ -1335,8 +1504,12 @@ export const register: Register = (on, options: Options) => {
   on('command.run', { command: 'advisor' }, async ($, e, next) => {
     const result = await next(e)
     const arg = e.args.trim().toLowerCase()
+    // A model it does not take, a word it does not know (`Usage:`): it changed
+    // nothing, so the settings say what stands (the review of 2026-11-20).
+    const said = typeof result?.text === 'string' ? result.text : ''
+    const refused = said !== '' && !LANDED.advisor.test(said) && REFUSED.test(said)
     // `/advisor off`, `/advisor fable`; the picker (no argument) saves to the settings.
-    const advisor = arg === 'off' ? { off: true } : arg ? { model: arg } : await advisorSetting($)
+    const advisor = refused || !arg ? await advisorSetting($) : arg === 'off' ? { off: true } : { model: arg }
     note($, s => advisorSet(s, advisor))
     return result
   }).catch(($, e, next) => next(e))
@@ -1382,7 +1555,8 @@ export const register: Register = (on, options: Options) => {
     const s = await read($, tree)
     const ui = await read($, uiState)
     const f = await read($, frameAtom)
-    const line = bandLine(s, e.props.bodyColumns, { frame: f, animate, lang: ui.lang })
+    const look = await read($, lookAtom)
+    const line = bandLine(s, e.props.bodyColumns, { frame: f, animate: motionOf(options, look), lang: ui.lang })
     if (line.length === 0) return next(e)
     const { Text } = $.ui.resolve(e)
     return (
@@ -1400,6 +1574,8 @@ export const register: Register = (on, options: Options) => {
     const s = await read($, tree)
     const ui = await read($, uiState)
     const f = await read($, frameAtom)
+    // The theme, reduced motion and the locks as last read: a reload's first drawing too, and a change draws again.
+    const look = await read($, lookAtom)
     const now = await $.clock.now()
     const rows: Row[] = layout(s, ui, {
       cols: e.props.bodyColumns,
@@ -1407,13 +1583,13 @@ export const register: Register = (on, options: Options) => {
       placement: e.props.placement,
       now,
       frame: f,
-      animate,
+      animate: motionOf(options, look),
       logRows: logRowsOf(options),
       draft: composeValue,
       limits: thresholdsOf(options),
-      settings: settingsOf(options),
+      settings: settingsOf(options, look.locked),
       look: options.hud !== false ? 'hud' : 'classic',
-      theme,
+      theme: look.theme,
       ...(bootAt !== undefined ? { bootAt } : {}),
       ...(panelAt !== undefined ? { openedAt: panelAt } : {}),
     })
@@ -1451,13 +1627,13 @@ export const register: Register = (on, options: Options) => {
                   // Blank, the field's width: the engine sizes the field's
                   // clickable box to what it shows, and an empty field with
                   // no placeholder is no cells wide (the hint is in the frame).
-                  placeholder={' '.repeat(row.room)}
+                  placeholder={' '.repeat(row.placeholder)}
                   // No word for Enter beside the field (the user's request): the engine still draws its ⏎ while the field has focus.
                   submitLabel=""
                   {...(row.value !== undefined ? { value: row.value } : {})}
                   autoFocus
                   onInput={value => {
-                    drafts.set(agentId, value)
+                    keepDraft(agentId, value)
                   }}
                   onSubmit={value => {
                     void sendMessage($, agentId, value).catch(() => undefined)

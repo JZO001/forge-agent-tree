@@ -64,11 +64,30 @@ describe('every row fits the pane', () => {
   test('the help view and the empty pane fit too, in every language', () => {
     for (const cols of [36, 56, 78]) {
       for (const ui of ALL_LANGS) {
-        const help = layout(busyTree(), { ...ui, view: 'help' }, { cols, now: NOW, frame: 0, animate: true })
+        const help = layout(busyTree(), { ...ui, view: 'help' }, { cols, now: NOW, frame: 0, animate: true, version: '0.1.0' })
+        const hud = layout(busyTree(), { ...ui, view: 'help' }, { cols, now: NOW, frame: 0, animate: true, version: '10.12.123', look: 'hud', theme: 'dark' })
         const empty = layout(emptyTree(NOW), ui, { cols, now: NOW, frame: 0, animate: true })
-        for (const row of [...help, ...empty]) expect(rowWidth(row) <= cols, lineOf(row)).toBe(true)
+        for (const row of [...help, ...hud, ...empty]) expect(rowWidth(row) <= cols, lineOf(row)).toBe(true)
       }
     }
+  })
+
+  test('the help ends with the mod’s version and its repository, the labels in one column (the user’s request of 2026-11-20)', () => {
+    for (const ui of ALL_LANGS) {
+      const lines = layout(busyTree(), { ...ui, view: 'help' }, { cols: 56, now: NOW, frame: 0, animate: false, version: '0.1.0' }).map(lineOf)
+      const label = wordsFor(ui.lang).version
+      const at = lines.findIndex(l => l.startsWith(`${label} `))
+      expect(at > 0, `${ui.lang}: ${label}`).toBe(true)
+      expect(lines[at], ui.lang).toMatch(/ 0\.1\.0$/)
+      expect(lines[at + 1], ui.lang).toMatch(/^GitHub +https:\/\/github\.com\/JZO001\/forge-agent-tree$/)
+      // the version and the link start in one column
+      expect(width(lines[at]!.slice(0, lines[at]!.indexOf('0.1.0'))), ui.lang).toBe(width(lines[at + 1]!.slice(0, lines[at + 1]!.indexOf('https'))))
+    }
+    expect(layout(busyTree(), { ...UI, view: 'help' }, { cols: 56, now: NOW, frame: 0, animate: false, version: '0.1.0' }).map(lineOf)).toContain('Version  0.1.0')
+    // a version that could not be read: no row for it, the link stays
+    const none = layout(busyTree(), { ...UI, view: 'help' }, { cols: 56, now: NOW, frame: 0, animate: false }).map(lineOf)
+    expect(none.some(l => l.startsWith('Version'))).toBe(false)
+    expect(none.some(l => l.startsWith('GitHub'))).toBe(true)
   })
 })
 
@@ -1387,7 +1406,8 @@ describe('workflow runs', () => {
       const row = rows.find(r => lineOf(r).startsWith('GitHub '))
       const link = row && row.kind !== 'keys' ? row.segs.find(x => x.href !== undefined) : undefined
       expect(link, `${cols}`).toMatchObject({ href: 'https://github.com/JZO001/forge-agent-tree', color: TITLE_COLOR })
-      if (cols >= 56) expect(lineOf(row!)).toBe('GitHub  https://github.com/JZO001/forge-agent-tree')
+      // its label as wide as the version's (`Version`), so the two values start in one column
+      if (cols >= 56) expect(lineOf(row!)).toBe('GitHub   https://github.com/JZO001/forge-agent-tree')
       expect(rowWidth(row!) <= cols).toBe(true)
     }
   })
@@ -1495,6 +1515,28 @@ describe('the empty rows in the header (the user asked for them)', () => {
 
 describe('the options page (plan 06)', () => {
   const OPTIONS: TreeUi = { ...UI, view: 'options' }
+
+  test('the heading carries the mod’s version at its right, dim, wherever it fits beside the heading whole (the user’s choice of 2026-11-20)', () => {
+    for (const cols of [36, 44, 56, 72, 120]) {
+      for (const ui of ALL_LANGS) {
+        for (const look of ['classic', 'hud'] as const) {
+          const rows = layout(busyTree(), { ...ui, view: 'options' }, { cols, now: NOW, frame: 0, animate: false, version: '0.1.0', look, theme: 'dark' })
+          const heading = rows.find(r => r.kind === 'text' && r.segs.some(x => x.part === 'heading'))
+          const which = `${ui.lang} ${look} ${cols}`
+          expect(heading, which).toBeDefined()
+          for (const row of rows) expect(rowWidth(row) <= cols, `${which}: ${lineOf(row)}`).toBe(true)
+          // the heading whole; the version at the row's right end, dim
+          expect(lineOf(heading!).endsWith(' v0.1.0'), `${which}: ${lineOf(heading!)}`).toBe(true)
+          const v = segsOf(heading).find(x => x.text === 'v0.1.0')
+          expect(v?.dim, which).toBe(true)
+        }
+      }
+    }
+    // in English, as the user saw it proposed
+    expect(lineOf(layout(busyTree(), OPTIONS, { cols: 56, now: NOW, frame: 0, animate: false, version: '0.1.0' }).find(r => lineOf(r).startsWith('Options'))!)).toMatch(/^Options +v0\.1\.0$/)
+    // no version read: the heading alone, as before
+    expect(lineOf(layout(busyTree(), OPTIONS, { cols: 56, now: NOW, frame: 0, animate: false }).find(r => lineOf(r).startsWith('Options'))!)).toBe('Options')
+  })
   const page = (ui: TreeUi = OPTIONS, cols = 56, rows?: number, settings?: Settings) =>
     layout(busyTree(), ui, { cols, rows, now: NOW, frame: 0, animate: false, ...(settings ? { settings } : {}) })
   const segsOf = (row: Row | undefined) => (row && row.kind !== 'keys' ? row.segs : [])

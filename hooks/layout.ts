@@ -184,6 +184,8 @@ export type LayoutOptions = {
   openedAt?: number
   /** Whether the empty tree gets the HUD's radar: decided by `layout`, where nothing else has to give way for it. */
   radar?: boolean
+  /** The mod's own version, from its manifest: the help shows it. */
+  version?: string
 }
 
 export type Look = 'hud' | 'classic'
@@ -1473,7 +1475,7 @@ function keysRow(mode: Mode, cols: number, view: TreeView, w: Words): Row {
   return { kind: 'keys', items }
 }
 
-function helpRows(mode: Mode, cols: number, w: Words, look?: Look): Row[] {
+function helpRows(mode: Mode, cols: number, w: Words, look?: Look, version?: string): Row[] {
   const l = w.legend
   const legend: Part[][] = [
     [{ text: SPINNER[2] }, { text: ` ${l.running}  ` }, { text: '✓', color: 'success' }, { text: ` ${l.done}  ` }, { text: '✗', color: 'error' }, { text: ` ${l.failed}  ` }, { text: '■', color: 'warning' }, { text: ` ${l.stopped}` }],
@@ -1538,9 +1540,23 @@ function helpRows(mode: Mode, cols: number, w: Words, look?: Look): Row[] {
     ...l.keys.map(line => text(fit([{ text: line, dim: true, flex: true }], [], cols))),
     // How to close the pane and open it again from the prompt (the user's request of 2026-11-19).
     text(fit([{ text: l.commands, dim: true, flex: true }], [], cols)),
-    // Where the mod lives (the user's request of 2026-11-19): a link a click opens.
-    text(fit([{ text: 'GitHub  ', dim: true }, { text: REPO_URL, href: REPO_URL, color: TITLE_COLOR, flex: true }], [], cols)),
+    // The mod's own version (the user's request of 2026-11-20), then where it lives (2026-11-19): a link a click opens.
+    ...aboutRows(cols, w, version),
     keysRow(mode, cols, 'help', w),
+  ]
+}
+
+/**
+ * The help's last lines, about the mod: its version, where it could be read
+ * (the user's request of 2026-11-20), and its repository, a link a click opens.
+ * The labels in one column.
+ */
+function aboutRows(cols: number, w: Words, version: string | undefined): Row[] {
+  const pad = Math.max(width(w.version), width('GitHub')) + 2
+  const label = (t: string): Part => ({ text: `${t}${' '.repeat(pad - width(t))}`, dim: true })
+  return [
+    ...(version ? [text(fit([label(w.version), { text: version, flex: true }], [], cols))] : []),
+    text(fit([label('GitHub'), { text: REPO_URL, href: REPO_URL, color: TITLE_COLOR, flex: true }], [], cols)),
   ]
 }
 
@@ -1615,7 +1631,11 @@ function optionsRows(s: TreeState, ui: TreeUi, mode: Mode, cols: number, w: Word
     row: text(fit([{ text: t.language, flex: true }], [{ text: '▾', color: TITLE_COLOR, press, key: 'picker:lang' }, { text: name, press, key: 'picker:lang' }], cols, true)),
   })
   const panel = ui.picker === 'lang' ? panelRows('lang', s, ui, cols, w) : []
-  const head: Row[] = [titleRow(cols), ...panel, text(fit([{ text: t.title, bold: true, part: 'heading' }], [], cols)), sep(cols)]
+  // The heading, and at its right the mod's own version, dim, where it fits beside the heading
+  // whole (the user's choice of 2026-11-20: the page that also holds the Auto-update switch).
+  const heading: Part[] = [{ text: t.title, bold: true, part: 'heading' }]
+  const version = firstFit(heading, o.version ? [[{ text: `v${o.version}`, dim: true }], []] : [[]], cols)
+  const head: Row[] = [titleRow(cols), ...panel, text(fit(heading, version, cols)), sep(cols)]
   let body = lines
   let note: Row[] = [sep(cols, { close: true }), text(fit([{ text: t.note, dim: true, flex: true }], [], cols))]
   const total = (): number => head.length + body.length + note.length + 1
@@ -2014,7 +2034,7 @@ export function layout(s: TreeState, ui: TreeUi, o: LayoutOptions): Row[] {
 
 function classic(s: TreeState, ui: TreeUi, o: LayoutOptions, cols: number, w: Words): Row[] {
   const mode = modeOf(cols)
-  if (ui.view === 'help') return helpRows(mode, cols, w, o.look)
+  if (ui.view === 'help') return helpRows(mode, cols, w, o.look, o.version)
   if (ui.view === 'options') return optionsRows(s, ui, mode, cols, w, o)
   if (ui.view === 'sounds') return soundsRows(mode, cols, w, o)
   let foot = 2 // a separator and the keys, or the message panel

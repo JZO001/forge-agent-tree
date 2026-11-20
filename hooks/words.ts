@@ -176,6 +176,8 @@ export type Words = {
   messageLog: string
   messageFailed: (reason: string) => string
   messageLegend: string
+  /** The help's label for the mod's own version. */
+  version: string
   said: (text: string) => string
   switchFailed: (command: string, value: string) => string
   notApplied: (command: string, value: string) => string
@@ -330,6 +332,7 @@ const EN: Words = {
   messageLog: 'message sent',
   messageFailed: reason => `${NAME}: the message was not delivered: ${reason}`,
   messageLegend: 'message an agent; a finished one resumes',
+  version: 'Version',
   said: text => `${NAME}: ${text}`,
   switchFailed: (command, value) => `${NAME}: /${command} ${value} did not run`,
   notApplied: (command, value) => `${NAME}: /${command} ${value} has not taken effect`,
@@ -460,6 +463,7 @@ const HU: Words = {
   messageLog: 'üzenet elküldve',
   messageFailed: reason => `${NAME}: az üzenet nem érkezett meg: ${reason}`,
   messageLegend: 'üzenet egy agentnek; a befejezett újraindul',
+  version: 'Verzió',
   said: text => `${NAME}: ${text}`,
   switchFailed: (command, value) => `${NAME}: a /${command} ${value} nem futott le`,
   notApplied: (command, value) => `${NAME}: a /${command} ${value} nem lépett életbe`,

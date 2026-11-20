@@ -93,6 +93,8 @@ type World = {
   noLimits?: boolean
   /** `claude` starts only through cmd.exe (an npm install's `claude.cmd` on Windows): run by itself it cannot start. */
   claudeViaCmd?: boolean
+  /** The version the mod's own manifest states (0.1.0 when not given); `null`: the manifest cannot be read. */
+  manifest?: string | null
 }
 
 
@@ -196,6 +198,11 @@ async function session($: Engine, on: On, agents: AgentInfo[] = [], world: World
   })
   mock.env(on, world.env ?? {})
   on('process.hookEnv', () => ({ value: (world.pluginRoot ? { CLAUDE_PLUGIN_ROOT: world.pluginRoot } : {}) as Record<string, string> }))
+  // The mod's own manifest beneath, under its folder: what the help shows as its version.
+  on('fs.read', (_, e) => {
+    if (!String(e.path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json') || world.manifest === null) throw new Error(`ENOENT: ${e.path}`)
+    return { value: JSON.stringify({ name: 'forge-agent-tree', version: world.manifest ?? '0.1.0' }) }
+  })
   on('config.list', () => ({
     value: [
       { key: 'model', label: 'Model', kind: 'choice' as const, value: world.modelSetting ?? 'opus', options: OFFER, provider: { plugin: 'engine', tier: 'core' as const }, isLocked: false },
@@ -350,6 +357,8 @@ test('the help key opens the legend and goes back', async ($, on) => {
   expect(await ui.find({ text: /Legend/ })).toBeDefined()
   // the repository, as a link a click opens
   expect(JSON.stringify(await ui.drawn())).toMatch(/"type":"Link","props":\{"href":"https:\/\/github\.com\/JZO001\/forge-agent-tree"/)
+  // the mod's own version, read from its manifest (the user's request of 2026-11-20)
+  expect(await ui.find({ text: /^Version +0\.1\.0$/ })).toBeDefined()
   await ui.press({ key: 'key-help' })
   expect(await ui.find({ text: /Legend/ })).toBeUndefined()
   expect(await ui.find({ text: /Find auth handlers/ })).toBeDefined()
@@ -366,6 +375,23 @@ test('an advisor call in a model step reaches the advisor row', async ($, on) =>
   const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
   expect(await ui.find({ text: /◆ × 1/ })).toBeDefined()
   expect(await ui.find({ text: /4\.1s/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a manifest that cannot be read: the help has no version row, the rest as before', async ($, on) => {
+  await session($, on, [], { id: 's1', model: 'claude-opus-5-5', manifest: null })
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-help' })
+  expect(await ui.find({ text: /^Version/ })).toBeUndefined()
+  expect(await ui.find({ text: /^GitHub/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the help shows the version the installed manifest states', async ($, on) => {
+  await session($, on, [], { id: 's1', model: 'claude-opus-5-5', manifest: '0.4.2', store: { language: 'hu' } })
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await ui.press({ key: 'key-help' })
+  expect(await ui.find({ text: /^Verzió +0\.4\.2$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1147,7 +1173,8 @@ test('o opens the options page; a press sets the option as /config would; a lock
   const { configSets } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', lockedOptions: ['bandLine'] })
   const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
   await ui.press({ key: 'key-options' })
-  expect(await ui.find({ text: /^Options$/ })).toBeDefined()
+  // its heading, the mod's version at its right (read from its manifest; the user's choice of 2026-11-20)
+  expect(await ui.find({ text: /^Options +v0\.1\.0$/ })).toBeDefined()
   expect(await ui.find({ text: /^Sound +on$/ })).toBeDefined()
   await ui.press({ key: 'option:sound' })
   await ui.press({ key: 'option:logRows:up' })

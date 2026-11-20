@@ -288,10 +288,11 @@ export type TreeUi = {
 
 /**
  * What the pane draws with, read off Claude Code's settings (its theme,
- * `prefersReducedMotion`) and the options' locks. Kept across a reload, so the
- * first drawing after a change of options is not in the defaults' colors.
+ * `prefersReducedMotion`), the options' locks and the mod's own manifest (its
+ * version). Kept across a reload, so the first drawing after a change of
+ * options is not in the defaults' colors.
  */
-export type TreeLook = { theme: 'dark' | 'light' | 'ansi'; reduced: boolean; locked: string[] }
+export type TreeLook = { theme: 'dark' | 'light' | 'ansi'; reduced: boolean; locked: string[]; /** The mod's own version, from its manifest: the help shows it. */ version?: string }
 
 /**
  * What the pane did at this process's start, kept across a reload (a change of

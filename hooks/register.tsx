@@ -69,7 +69,7 @@ import {
 import type { ListedAgent, PinBefore, RunFacts, SpawnFacts } from './model'
 import { NAME, chooseLang, isLang, wordsFor } from './words'
 import type { OptionField } from './words'
-import { UPDATE_KEY, checkForUpdate, switchedOff, viaShell } from './update'
+import { UPDATE_KEY, checkForUpdate, manifestVersion, switchedOff, viaShell } from './update'
 import type { UpdateHost } from './update'
 
 const PANE = 'forge-tree'
@@ -632,6 +632,13 @@ function powerUp($: EngineInterface, options: Options): void {
 let theme: ThemeKind = 'dark'
 /** Claude Code's `prefersReducedMotion`: every motion off, as the Motion option does. */
 let reduced = false
+/** The mod's own version, from its manifest: the help shows it. */
+let ownVersion: string | undefined
+
+/** The mod's own version, read from its manifest (`plugin.json` under `$.plugin.root`); none where it cannot be read. */
+async function readVersion($: EngineInterface): Promise<string | undefined> {
+  return manifestVersion(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`).catch(() => undefined))
+}
 
 /** Whether the pane moves: the Motion option, unless Claude Code asks for reduced motion. */
 function motionOf(options: Options, look: { reduced: boolean } = { reduced }): boolean {
@@ -652,7 +659,7 @@ async function readLook($: EngineInterface): Promise<void> {
 
 /** The look as the module holds it, into $.state where it changed. */
 async function keepLook($: EngineInterface): Promise<void> {
-  const value: TreeLook = { theme, reduced, locked: [...lockedOptions] }
+  const value: TreeLook = { theme, reduced, locked: [...lockedOptions], ...(ownVersion ? { version: ownVersion } : {}) }
   const was = await read($, lookAtom).catch(() => undefined)
   if (was && JSON.stringify(was) === JSON.stringify(value)) return
   await update($, lookAtom, () => value).catch(() => undefined)
@@ -807,7 +814,8 @@ async function boot($: EngineInterface, isInteractive: boolean, options: Options
   const advisor = await advisorSetting($)
   const effort = await configuredEffort($, model)
   change(t => advisorSet(configured(t, { model, effort }), advisor))
-  // The theme and reduced motion (and so the motion), before anything is drawn from them.
+  // The mod's own version (the help shows it), the theme and reduced motion (and so the motion), before anything is drawn from them.
+  ownVersion = await readVersion($)
   await readLook($)
   // A change of options reloads the plugin and this runs again: what this process's start already did stays done.
   const begun = await read($, startAtom).catch(() => undefined)
@@ -1590,6 +1598,7 @@ export const register: Register = (on, options: Options) => {
       settings: settingsOf(options, look.locked),
       look: options.hud !== false ? 'hud' : 'classic',
       theme: look.theme,
+      ...(look.version ? { version: look.version } : {}),
       ...(bootAt !== undefined ? { bootAt } : {}),
       ...(panelAt !== undefined ? { openedAt: panelAt } : {}),
     })

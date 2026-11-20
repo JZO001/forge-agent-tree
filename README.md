@@ -22,15 +22,15 @@ It watches, and changes nothing unless you pick something in the pane. It makes 
 
 <table>
   <tr>
-    <td width="50%" valign="top"><img src="docs/hud-picker.gif" width="420" alt="A choice panel unfolding under the header: the session's model, the one in use lit"><br><b>Choice panels.</b> A <code>▾</code> opens a panel under the header: the session's model, effort or advisor, or what new subagents get. Picking one runs the same command you would type (<code>/model</code>, <code>/effort</code>, <code>/advisor</code>), and the header shows it pending until it takes effect.</td>
-    <td width="50%" valign="top"><img src="docs/hud-message.gif" width="420" alt="The message panel at the pane's foot: an effort line and a message being typed to an agent"><br><b>A message to an agent.</b> The <code>✎</code> on an agent's row opens a message panel at the pane's foot. A running agent reads the message at its next step, and a finished one is resumed with it, at the effort chosen above the field.</td>
+    <td width="50%" valign="top"><img src="docs/hud-picker.gif" width="100%" alt="A choice panel unfolding under the header: the session's model, the one in use lit"><br><b>Choice panels.</b> A <code>▾</code> opens a panel under the header: the session's model, effort or advisor, or what new subagents get. Picking one runs the same command you would type (<code>/model</code>, <code>/effort</code>, <code>/advisor</code>), and the header shows it pending until it takes effect.</td>
+    <td width="50%" valign="top"><img src="docs/hud-message.gif" width="100%" alt="The message panel at the pane's foot: an effort line and a message being typed to an agent"><br><b>A message to an agent.</b> The <code>✎</code> on an agent's row opens a message panel at the pane's foot. A running agent reads the message at its next step, and a finished one is resumed with it, at the effort chosen above the field.</td>
   </tr>
   <tr>
-    <td width="50%" valign="top"><img src="docs/hud-workflow.gif" width="420" alt="A workflow run as one row with its agents under it and a squad bar of their states"><br><b>Workflow runs.</b> A workflow run is one row: its name, its agents counted by state, its time, and a squad bar of their states. Its agents at work hang under it, and a press on the row shows all of them.</td>
-    <td width="50%" valign="top"><img src="docs/hud-empty.gif" width="420" alt="An empty tree with a radar sweeping beside the words No subagents yet"><br><b>An empty tree.</b> Until the first subagent starts, a radar sweeps beside “No subagents yet.” The header and the log work as ever.</td>
+    <td width="50%" valign="top"><img src="docs/hud-workflow.gif" width="100%" alt="A workflow run as one row with its agents under it and a squad bar of their states"><br><b>Workflow runs.</b> A workflow run is one row: its name, its agents counted by state, its time, and a squad bar of their states. Its agents at work hang under it, and a press on the row shows all of them.</td>
+    <td width="50%" valign="top"><img src="docs/hud-empty.gif" width="100%" alt="An empty tree with a radar sweeping beside the words No subagents yet"><br><b>An empty tree.</b> Until the first subagent starts, a radar sweeps beside “No subagents yet.” The header and the log work as ever.</td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/hud-boot.gif" width="420" alt="The boot sequence: the title types in, the systems report OK, then the pane draws itself in"><br><b>The boot.</b> The first time the pane opens, the Forge HUD boots: the title types in, the systems report, then the pane draws itself in. The Motion option, or Claude Code's reduced-motion setting, stills this and every other effect.</td>
+    <td colspan="2" align="center"><img src="docs/hud-boot.gif" width="48%" alt="The boot sequence: the title types in, the systems report OK, then the pane draws itself in"><br><b>The boot.</b> The first time the pane opens, the Forge HUD boots: the title types in, the systems report, then the pane draws itself in. The Motion option, or Claude Code's reduced-motion setting, stills this and every other effect.</td>
   </tr>
 </table>
 

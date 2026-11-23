@@ -18,6 +18,7 @@ import {
   cut,
   duration,
   EFFORT_LEVELS,
+  EMOJI_ROOM,
   effortName,
   effortShort,
   LIMIT_THRESHOLDS,
@@ -42,7 +43,7 @@ import { LANGS, wordsFor } from './words'
 import type { OptionField, Words } from './words'
 import { SOUND_EVENTS, SOUND_OPTION } from './sounds'
 import type { SoundEvent } from './sounds'
-import { NOTICE_EVENTS, NOTICE_OPTION } from './notices'
+import { NOTICE_EVENTS, NOTICE_GAPS, NOTICE_GAP_S, NOTICE_OPTION } from './notices'
 import type { NoticeEvent } from './notices'
 import { RADAR, skin } from './hud'
 
@@ -145,8 +146,12 @@ export type Press =
   | { kind: 'notices' }
   /** Sends an event's notification now, to see it (the notifications page's `►`). */
   | { kind: 'testNotice'; event: NoticeEvent }
-  /** The whole tree a page at a time from this row (`+ n more`, `▲`, `▼`); none goes back to the rows that matter most (`×`). */
-  | { kind: 'treeAt'; at?: number }
+  /**
+   * The whole tree a page at a time from this row (`+ n more`, `▲`, `▼`); none
+   * goes back to the rows that matter most (`×`). `focus`: the button the focus
+   * ring goes to after it, as the redraw hands out new handles (plan 19 §3).
+   */
+  | { kind: 'treeAt'; at?: number; focus?: string }
 
 export type KeyButton = { key: string; hotkey: string; label: string; press: Press }
 export type KeyItem = { text: string } | KeyButton
@@ -241,14 +246,16 @@ export const DEFAULT_SETTINGS: Settings['values'] = {
   notifyRun: true,
   notifyTurn: true,
   notifyAlert: true,
+  // One kind at most this often, in seconds (plan 19 §4; the user's default of 2026-11-23).
+  noticeGap: NOTICE_GAP_S,
   autoUpdate: true,
 }
 
 /** The options page's rows, in this order: the sounds page's row after `sound`, the notifications page's after `notify`, the language last. */
 export const OPTION_ORDER: readonly OptionField[] = ['openOnStart', 'animate', 'hud', 'columns', 'logRows', 'limitWarnAt', 'limitAlertAt', 'bandLine', 'sound', 'notify', 'autoUpdate']
 
-/** Every option of the mod: the options page's, the sounds page's and the notifications page's. */
-export const OPTION_FIELDS: readonly OptionField[] = [...OPTION_ORDER, ...SOUND_EVENTS.map(e => SOUND_OPTION[e]), ...NOTICE_EVENTS.map(e => NOTICE_OPTION[e])]
+/** Every option of the mod: the options page's, the sounds page's and the notifications page's (its events, then the gap). */
+export const OPTION_FIELDS: readonly OptionField[] = [...OPTION_ORDER, ...SOUND_EVENTS.map(e => SOUND_OPTION[e]), ...NOTICE_EVENTS.map(e => NOTICE_OPTION[e]), 'noticeGap']
 
 export const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const
 /** The mod's repository, shown in the help view. */
@@ -1320,7 +1327,12 @@ function treeList(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: LayoutO
     const right: Part[] = more > 0 || mode === 'narrow' ? [] : [{ text: w.show, dim: true }]
     const segs = fit([{ text: '└─ ', dim: true }, { text: label, dim: true }], right, cols, true)
     // `+ n more` opens the whole tree a page at a time (plan 13); `+ n finished` shows the finished agents, as `f` does.
-    rows.push(more > 0 ? { kind: 'press', key: 'more', press: { kind: 'treeAt', at: 0 }, segs } : { kind: 'press', key: 'finished', press: { kind: 'finished' }, segs })
+    // From `+ n more` the ring goes on to `▼`, the next page (plan 19 §3).
+    rows.push(
+      more > 0
+        ? { kind: 'press', key: 'more', press: { kind: 'treeAt', at: 0, focus: 'tree:down' }, segs }
+        : { kind: 'press', key: 'finished', press: { kind: 'finished' }, segs },
+    )
   }
   return rows
 }
@@ -1343,10 +1355,20 @@ function pagedTree(s: TreeState, ui: TreeUi, mode: Mode, cols: number, o: Layout
   const step = Math.max(1, size - 1)
   const up = at > 0 ? Math.max(0, at - step) : undefined
   const down = at + size < all.length ? Math.min(all.length - size, at + step) : undefined
-  const arrow = (sign: string, to: number | undefined, key: string): Part =>
-    to === undefined ? { text: sign, dim: true } : { text: sign, color: TITLE_COLOR, press: { kind: 'treeAt', at: to }, key }
-  const left: Part[] = [arrow('▲', up, 'tree:up'), { text: '  ' }, arrow('▼', down, 'tree:down'), { text: '  ' }, { text: `${at + 1}–${at + shown.length} / ${all.length}` }]
-  const close: Part[] = [{ text: '×', color: TITLE_COLOR, press: { kind: 'treeAt' }, key: 'tree:close' }]
+  // After a press the focus ring stays on the arrow pressed while it still leads
+  // somewhere, else goes to the other one; `×` hands it back to `+ n more` (plan 19 §3).
+  const upFocus = up !== undefined && up > 0 ? 'tree:up' : 'tree:down'
+  const downFocus = down !== undefined && down + size < all.length ? 'tree:down' : 'tree:up'
+  const arrow = (sign: string, to: number | undefined, key: string, focus: string): Part =>
+    to === undefined ? { text: sign, dim: true } : { text: sign, color: TITLE_COLOR, press: { kind: 'treeAt', at: to, focus }, key }
+  const left: Part[] = [
+    arrow('▲', up, 'tree:up', upFocus),
+    { text: '  ' },
+    arrow('▼', down, 'tree:down', downFocus),
+    { text: '  ' },
+    { text: `${at + 1}–${at + shown.length} / ${all.length}` },
+  ]
+  const close: Part[] = [{ text: '×', color: TITLE_COLOR, press: { kind: 'treeAt', focus: 'more' }, key: 'tree:close' }]
   return [...trunk(shown, o.animate ? o.frame : undefined), text(fit(left, close, cols, true))]
 }
 
@@ -1611,9 +1633,17 @@ function aboutRows(cols: number, w: Words, version: string | undefined): Row[] {
 
 // ── options page ────────────────────────────────────────────────────────
 
-/** A number option's bounds and step; the limit thresholds bound each other (red stays above yellow). */
-function numberSpec(field: OptionField, v: Settings['values']): { min: number; max: number; step: number; percent?: true } | undefined {
+/**
+ * A number option's bounds and step; the limit thresholds bound each other (red
+ * stays above yellow). `steps`: the values it walks instead of a step; `seconds`:
+ * a time, drawn as one (0 as off).
+ */
+type NumberSpec = { min: number; max: number; step: number; percent?: true; steps?: readonly number[]; seconds?: true }
+
+function numberSpec(field: OptionField, v: Settings['values']): NumberSpec | undefined {
   switch (field) {
+    case 'noticeGap':
+      return { min: 0, max: 60, step: 0, steps: NOTICE_GAPS, seconds: true }
     case 'columns':
       return { min: 36, max: 120, step: 4 }
     case 'logRows':
@@ -1640,13 +1670,19 @@ function optionValue(field: OptionField, value: boolean | number, v: Settings['v
     return locked ? [{ text: word, ...look }] : [{ text: word, ...look, press: { kind: 'option', field, value: !value }, key }]
   }
   const spec = numberSpec(field, v)
-  const shown = `${value}${spec?.percent ? '%' : ''}`
-  if (locked || !spec) return [{ text: shown }]
-  const down = Math.max(spec.min, value - spec.step)
-  const up = Math.min(spec.max, value + spec.step)
+  // A time is a time value: in the times' color, as every one (0 is off, no time).
+  const shown: Part = spec?.seconds
+    ? value > 0
+      ? { text: duration(value * 1000, w.lang), color: TIME_COLOR }
+      : { text: w.off.replace(/^\s*·\s*/, '') }
+    : { text: `${value}${spec?.percent ? '%' : ''}` }
+  if (locked || !spec) return [shown]
+  // The next value down and up: a step, or the next of the values it walks.
+  const down = spec.steps ? ([...spec.steps].reverse().find(x => x < value) ?? value) : Math.max(spec.min, value - spec.step)
+  const up = spec.steps ? (spec.steps.find(x => x > value) ?? value) : Math.min(spec.max, value + spec.step)
   const minus: Part = down < value ? { text: '−', color: TITLE_COLOR, press: { kind: 'option', field, value: down }, key: `${key}:down` } : { text: '−', dim: true }
   const plus: Part = up > value ? { text: '+', color: TITLE_COLOR, press: { kind: 'option', field, value: up }, key: `${key}:up` } : { text: '+', dim: true }
-  return [minus, { text: ` ${shown} ` }, plus]
+  return [minus, { text: ' ' }, shown, { text: ' ' }, plus]
 }
 
 /**
@@ -1744,7 +1780,12 @@ function soundsRows(mode: Mode, cols: number, w: Words, o: LayoutOptions): Row[]
 
 /** The notifications page (plan 12, the user's decisions of 2026-11-20), as the sounds page: `►` sends the event's notification now. */
 function noticesRows(mode: Mode, cols: number, w: Words, o: LayoutOptions): Row[] {
-  const rows = [{ field: 'notify' as const }, ...NOTICE_EVENTS.map(e => ({ field: NOTICE_OPTION[e], test: { kind: 'testNotice', event: e } as Press, key: `notice:${e}` }))]
+  const rows = [
+    { field: 'notify' as const },
+    ...NOTICE_EVENTS.map(e => ({ field: NOTICE_OPTION[e], test: { kind: 'testNotice', event: e } as Press, key: `notice:${e}` })),
+    // How often one kind at most (plan 19 §4): after the events, before the note.
+    { field: 'noticeGap' as const },
+  ]
   const last = o.lastNotice
   return eventRows('notices', rows, w.notices.title, w.notices.note, mode, cols, w, o, last?.at !== undefined ? noticeStatus(last, last.at, cols, w) : undefined)
 }
@@ -2028,89 +2069,83 @@ export type BandPart = { text: string; style: BandStyle; runs?: Array<{ text: st
 /** What separates the parts, as in token-weather. */
 export const BAND_GAP = '  '
 
-/** The agents' signs on the band line: the most recent this many. */
-const BAND_AGENTS = 16
+/** The context bar's cells on the band line, as the header's in the normal view. */
+const BAND_BAR = 10
 
-/** A workflow run's sign on the band line: one for all of its agents, in the color of how it stands. */
-function bandRunSign(s: TreeState, r: TreeRun): { text: string; style: BandStyle } {
-  if (runFailed(s, r)) return { text: '▣', style: { color: 'error' } }
-  return { text: '▣', style: runEnded(r) ? { dimColor: true } : {} }
-}
-
-function bandSign(a: TreeAgent): { text: string; style: BandStyle } {
-  switch (a.state) {
-    case 'running':
-    case 'starting':
-      return { text: '●', style: modelColor(a.model) ? { color: modelColor(a.model) } : {} }
-    case 'waiting':
-      return { text: '‖', style: { color: 'warning' } }
-    case 'failed':
-      return { text: '✗', style: { color: 'error' } }
-    case 'done':
-      return { text: '✓', style: { dimColor: true } }
-    case 'stopped':
-      return { text: '■', style: { dimColor: true } }
-    case 'idle':
-      return { text: '○', style: { dimColor: true } }
+/**
+ * The context bar on the band line, where token-weather draws its chart: the
+ * fill in the weather's color, with motion on (and a fill of at least three
+ * cells) a cell a shade lighter running left to right, the rest dim; as the
+ * header's bar (`barParts`).
+ */
+function bandBar(fraction: number, color: string, motion: number | undefined): BandPart {
+  const b = bar(fraction, BAND_BAR)
+  const full = b.fill.replace(/[^█]/g, '').length
+  const runs: Array<{ text: string; style: BandStyle }> = []
+  if (motion !== undefined && full >= SHIMMER_MIN) {
+    const at = motion % full
+    runs.push({ text: '█'.repeat(at), style: { color } }, { text: '█', style: { color: brighter(color) } }, { text: '█'.repeat(full - at - 1), style: { color } })
+  } else {
+    runs.push({ text: '█'.repeat(full), style: { color } })
   }
+  runs.push({ text: b.fill.slice(full), style: { color } }, { text: b.rest, style: { dimColor: true } })
+  const kept = runs.filter(r => r.text.length > 0)
+  return { text: kept.map(r => r.text).join(''), style: {}, runs: kept }
 }
 
 /**
- * The line above the prompt while the pane is closed, drawn as token-weather
- * draws its own (the user's rule): parts two spaces apart, the first in a
- * color, the second bold, the third plain, then a part of runs (token-weather's
- * chart; here a sign for each agent, in its model's or its state's color), and
- * a dim one last. Fitted to `cols` as token-weather's: what does not fit goes
- * from the end, the signs before the counts.
+ * The agents' part of the band line, only while some work or wait: the
+ * spinner (or `‖` when none works) and the counts, bold (plan 19 §2, question 1).
  */
-export function bandLine(s: TreeState, cols: number, o: { frame: number; animate: boolean; lang?: Lang }): BandPart[] {
+function bandAgents(s: TreeState, o: { frame: number; animate: boolean }, w: Words): BandPart | undefined {
+  const working = s.agents.filter(a => a.state === 'running' || a.state === 'starting')
+  const waiting = s.agents.filter(a => a.state === 'waiting').length
+  if (working.length === 0 && waiting === 0) return undefined
+  const color = modelColor(working[0]?.model)
+  const sign = working.length > 0 ? { text: o.animate ? SPINNER[o.frame % SPINNER.length]! : '●', style: color ? { color } : {} } : { text: '‖', style: { color: 'warning' } }
+  const said = [working.length > 0 ? w.glance.running(working.length) : '', waiting > 0 ? w.glance.waiting(waiting) : ''].filter(Boolean).join(' · ')
+  const runs = [sign, { text: ` ${said}`, style: { bold: true } }]
+  return { text: runs.map(r => r.text).join(''), style: {}, runs }
+}
+
+/**
+ * The line above the prompt while the pane is closed, as token-weather's line
+ * (the user's request of 2026-11-19, made exact on 2026-11-23, plan 19 §2):
+ * `☀ Clear  11%  109.8k / 1M  <the context bar>  ▲ +722 last turn`, the bar
+ * where token-weather draws its chart; then, only while agents work or wait,
+ * their part. Fitted to `cols` as token-weather's: the agents' part goes
+ * first, then the words "last turn", the bar, the change, the token count.
+ * With token-weather's own row in the band (`weatherShown`) only the agents'
+ * part is left, so the two do not say the same twice; nothing to say, no line.
+ */
+export function bandLine(s: TreeState, cols: number, o: { frame: number; animate: boolean; lang?: Lang; weatherShown?: boolean }): BandPart[] {
   const w = wordsFor(o.lang)
-  const busy = anyActive(s)
-  const lead: BandPart = {
-    text: `${busy ? (o.animate ? SPINNER[o.frame % SPINNER.length]! : '●') : '○'} ${modelName(s.main.model)?.long ?? 'main'}`,
-    style: modelColor(s.main.model) ? { color: modelColor(s.main.model) } : {},
-  }
-  const count = (states: readonly string[]): number => s.agents.filter(a => states.includes(a.state)).length
-  const running = count(['running', 'starting'])
-  const waiting = count(['waiting'])
-  const done = count(['done'])
-  const failed = count(['failed'])
-  const first = running > 0 ? w.glance.running(running) : waiting > 0 ? w.glance.waiting(waiting) : w.legend.idle
-  const rest = [running > 0 && waiting > 0 ? w.glance.waiting(waiting) : '', done > 0 ? w.glance.done(done) : '', failed > 0 ? w.glance.failed(failed) : '']
-    .filter(Boolean)
-    .join(' · ')
-  const counts: BandPart = { text: first, style: { bold: true } }
-  const others: BandPart | undefined = rest ? { text: rest, style: {} } : undefined
-  const runs: Array<{ text: string; style: BandStyle }> = []
-  // A sign for each agent, the latest ones; a workflow run's agents one sign together.
-  const seen = new Set<string>()
-  const marks: Array<{ text: string; style: BandStyle }> = []
-  for (const a of s.agents) {
-    const run = runOf(s, a.run)
-    if (!run) marks.push(bandSign(a))
-    else if (!seen.has(run.id)) {
-      seen.add(run.id)
-      marks.push(bandRunSign(s, run))
-    }
-  }
-  for (const sign of marks.slice(-BAND_AGENTS)) {
-    const last = runs[runs.length - 1]
-    if (last && JSON.stringify(last.style) === JSON.stringify(sign.style)) last.text += sign.text
-    else runs.push({ ...sign })
-  }
-  const signs: BandPart | undefined = runs.length > 0 ? { text: runs.map(r => r.text).join(''), style: {}, runs } : undefined
-  const spent = cost(s.main.costUsd, s.main.hasUnknownPrice)
-  const tailText = [s.advisor.total > 0 ? `◆${s.advisor.total}` : '', spent].filter(Boolean).join(' · ')
-  const tail: BandPart | undefined = tailText ? { text: tailText, style: { dimColor: true } } : undefined
-  const keep = (parts: ReadonlyArray<BandPart | undefined>): BandPart[] => parts.filter((p): p is BandPart => p !== undefined)
+  const agents = bandAgents(s, o, w)
+  const p = s.main.contextPercent
+  if (p === undefined || o.weatherShown) return agents ? [agents] : []
+  const guess = s.main.contextEstimated === true
+  const weather = weatherFor(p)
+  // ☀ ☁ ☂ carry their space of their own (EMOJI_ROOM): it parts them from the word.
+  const word = w.weather[weather.key]
+  const sky: BandPart = { text: weather.icon.endsWith(EMOJI_ROOM) ? `${weather.icon}${word}` : `${weather.icon} ${word}`, style: { color: weather.color } }
+  const share: BandPart = { text: percent(p, guess).trim(), style: { bold: true } }
+  const used = s.main.contextTokens
+  const window = s.main.contextWindow
+  const amount: BandPart | undefined = used !== undefined && window ? { text: `${guess ? '~' : ''}${tokensFine(used)} / ${windowSize(window)}`, style: {} } : undefined
+  const meter = bandBar(p / 100, weather.color, o.animate ? o.frame : undefined)
+  const change = !guess && s.main.turnDelta !== undefined ? tokenDelta(s.main.turnDelta) : undefined
+  const told: BandPart | undefined = change ? { text: `${change} ${w.lastTurn}`, style: { dimColor: true } } : undefined
+  const terse: BandPart | undefined = change ? { text: change, style: { dimColor: true } } : undefined
+  const keep = (parts: ReadonlyArray<BandPart | undefined>): BandPart[] => parts.filter((x): x is BandPart => x !== undefined)
   const lines = [
-    keep([lead, counts, others, signs, tail]),
-    keep([lead, counts, others, tail]),
-    keep([lead, counts, others]),
-    keep([lead, counts]),
+    keep([sky, share, amount, meter, told, agents]),
+    keep([sky, share, amount, meter, told]),
+    keep([sky, share, amount, meter, terse]),
+    keep([sky, share, amount, terse]),
+    keep([sky, share, amount]),
   ]
-  const cells = (parts: readonly BandPart[]): number => parts.reduce((n, p) => n + width(p.text), width(BAND_GAP) * (parts.length - 1))
-  return lines.find(parts => cells(parts) <= cols) ?? [lead]
+  const cells = (parts: readonly BandPart[]): number => parts.reduce((n, x) => n + width(x.text), width(BAND_GAP) * (parts.length - 1))
+  return lines.find(parts => cells(parts) <= cols) ?? [sky, share]
 }
 
 // ── the whole pane ──────────────────────────────────────────────────────

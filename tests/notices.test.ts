@@ -1,6 +1,21 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { NOTICE_DELAY_MS, NOTICE_EVENTS, NOTICE_GAP_MS, NOTICE_OPTION, clean, nextNotices, noticeText, noticesOf, testSaid, toastScript, xmlChars } from '../hooks/notices'
+import {
+  NOTICE_DELAY_MS,
+  NOTICE_EVENTS,
+  NOTICE_GAPS,
+  NOTICE_GAP_MS,
+  NOTICE_GAP_S,
+  NOTICE_OPTION,
+  clean,
+  nextNotices,
+  noticeDelay,
+  noticeText,
+  noticesOf,
+  testSaid,
+  toastScript,
+  xmlChars,
+} from '../hooks/notices'
 import type { Notice, NoticeEvent } from '../hooks/notices'
 import { heardChanges, heardOf } from '../hooks/sounds'
 import { DEFAULT_SETTINGS } from '../hooks/layout'
@@ -107,20 +122,23 @@ describe('the text', () => {
 describe('when they go out', () => {
   const failure = (...items: string[]): Notice => ({ event: 'failed', items })
 
-  test('the first of a kind at once; what comes within 30 s waits, then goes out merged', () => {
+  test('the first of a kind at once; what comes within the gap (here 30 s) waits, then goes out merged', () => {
+    const gap = 30_000
     const last: Partial<Record<NoticeEvent, number>> = {}
-    const first = nextNotices({}, [failure('a')], all, last, NOW)
+    const first = nextNotices({}, [failure('a')], all, last, NOW, gap)
     expect(first.send).toEqual([failure('a')])
     expect(first.queue).toEqual({})
     last.failed = NOW
-    const held = nextNotices(first.queue, [failure('b')], all, last, NOW + 5000)
+    const held = nextNotices(first.queue, [failure('b')], all, last, NOW + 5000, gap)
     expect(held.send).toEqual([])
-    const more = nextNotices(held.queue, [failure('c', 'b')], all, last, NOW + 10_000)
+    const more = nextNotices(held.queue, [failure('c', 'b')], all, last, NOW + 10_000, gap)
     expect(more.send).toEqual([])
     expect(more.queue).toEqual({ failed: ['b', 'c'] })
     // nothing new: still waiting until the gap has passed
-    expect(nextNotices(more.queue, [], all, last, NOW + NOTICE_GAP_MS - 1).send).toEqual([])
-    expect(nextNotices(more.queue, [], all, last, NOW + NOTICE_GAP_MS)).toEqual({ queue: {}, send: [failure('b', 'c')] })
+    expect(nextNotices(more.queue, [], all, last, NOW + gap - 1, gap).send).toEqual([])
+    expect(nextNotices(more.queue, [], all, last, NOW + gap, gap)).toEqual({ queue: {}, send: [failure('b', 'c')] })
+    // the default gap is shorter: 10 s
+    expect(NOTICE_GAP_MS).toBe(10_000)
   })
 
   test('kinds keep their own gaps', () => {
@@ -143,9 +161,28 @@ describe('when they go out', () => {
     expect(nextNotices({ failed: ['a'] }, [], off, { failed: NOW }, NOW + 1000)).toEqual({ queue: {}, send: [] })
   })
 
-  test('a host holds one 20 s, less than the gap, so a newer one of a kind never replaces one still held', () => {
+  test('a host holds one 20 s, or the gap where that is shorter, so a newer one of a kind never replaces one still held (plan 19 §4)', () => {
     expect(NOTICE_DELAY_MS).toBe(20_000)
-    expect(NOTICE_DELAY_MS < NOTICE_GAP_MS).toBe(true)
+    expect(noticeDelay(30_000)).toBe(20_000)
+    expect(noticeDelay(NOTICE_GAP_MS)).toBe(10_000)
+    expect(noticeDelay(5_000)).toBe(5_000)
+    // no gap: each at once, and a host keeps its 20 s (it shows the newest of a kind)
+    expect(noticeDelay(0)).toBe(20_000)
+  })
+
+  test('the gap is an option: 10 s by default (the user’s decision of 2026-11-23), 0 sends each at once (plan 19 §4)', () => {
+    expect(NOTICE_GAP_S).toBe(10)
+    expect(DEFAULT_SETTINGS.noticeGap).toBe(10)
+    expect(NOTICE_GAPS).toEqual([0, 5, 10, 20, 30, 60])
+    const last: Partial<Record<NoticeEvent, number>> = { failed: NOW }
+    const queued = { failed: ['b'] }
+    // by default: held until 10 s have passed
+    expect(nextNotices(queued, [], all, last, NOW + 9_999).send).toEqual([])
+    expect(nextNotices(queued, [], all, last, NOW + 10_000).send).toEqual([failure('b')])
+    // 5 s
+    expect(nextNotices(queued, [], all, last, NOW + 5_000, 5_000).send).toEqual([failure('b')])
+    // off: what is raised goes at once, though one went a moment ago
+    expect(nextNotices({}, [failure('c')], all, last, NOW + 1, 0).send).toEqual([failure('c')])
   })
 
   test('every event is on by default, and so is the switch for them all (the user’s decision of 2026-11-20)', () => {

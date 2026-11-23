@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { ANY_GAP_MS, SOUND_GAP_MS, SOUND_WAIT_MS, heardOf, isCritical, nextSound, pickSound, soundEvents } from '../hooks/sounds'
 import type { SoundEvent } from '../hooks/sounds'
+import { turnCompleted } from '../hooks/model'
 import type { TreeAgent, TreeState } from '../types'
 import { NOW, busyTree, workflowTree } from './fixture'
 
@@ -66,6 +67,19 @@ describe('what a change of state sounds', () => {
     expect(soundEvents(before, { ...s, main: { ...s.main, limits: [{ kind: 'five_hour', percent: 85 }] } })).toEqual([])
     // an estimate of the context is not measured: it raises no alert
     expect(isCritical({ ...s, main: { ...s.main, contextPercent: 95, contextEstimated: true } })).toBe(false)
+  })
+
+  test('the main turn’s end says nothing where the person pressed Esc, or where they did not start the turn (plan 19 §5, §6)', () => {
+    const s = busyTree()
+    const before = heardOf(s)
+    const end = (main: Partial<TreeState['main']>, reason: 'answer' | 'aborted'): SoundEvent[] =>
+      soundEvents(before, turnCompleted({ ...s, main: { ...s.main, ...main } }, { reason }, NOW))
+    expect(end({ turnByPerson: true }, 'answer')).toEqual(['turn'])
+    expect(end({ turnByPerson: true }, 'aborted')).toEqual([])
+    // woken by a background task's notification (or a scheduled prompt, another session)
+    expect(end({ turnByPerson: false }, 'answer')).toEqual([])
+    // a turn the mod did not see start (a reload while it ran) still tells its end
+    expect(end({ turnByPerson: undefined }, 'answer')).toEqual(['turn'])
   })
 
   test('one started since the last hearing and already ended sounds as it ended; one first seen long ended does not (review of 2026-11-20)', () => {

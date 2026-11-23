@@ -171,7 +171,8 @@ export function heardChanges(prev: Heard, s: TreeState, thresholds?: LimitThresh
     if (runFailed(s, r)) out.push({ event: 'failed', run: r })
     else if (r.end === 'completed' || r.end === undefined) out.push({ event: 'done', run: r })
   }
-  if (prev.busy && !s.main.isBusy) out.push({ event: 'turn' })
+  // Not where the person pressed Esc, nor for a turn they did not start (plan 19 §5, §6).
+  if (prev.busy && !s.main.isBusy && s.main.turnQuiet !== true) out.push({ event: 'turn' })
   if (s.advisor.total > prev.advisor) out.push({ event: 'advisor' })
   if (!prev.critical && isCritical(s, thresholds)) out.push({ event: 'alert' })
   return out

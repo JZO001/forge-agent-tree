@@ -4,6 +4,8 @@ import { activity, ago, at, cut, duration, effortLevel, effortShort, modelEffort
 import { chooseLang, langOf, wordsFor } from '../hooks/words'
 import {
   MAX_AGENTS,
+  answered,
+  asked,
   configured,
   emptyTree,
   estimatedContext,
@@ -13,6 +15,7 @@ import {
   messagePin,
   messaged,
   orphaned,
+  personInTurn,
   pinBack,
   pendingSettled,
   recordOf,
@@ -42,9 +45,10 @@ import {
   runFailed,
   withChoices,
 } from '../hooks/model'
-import { advisorFromUsage, advisorSet } from '../hooks/model'
+import { advisorFromUsage, advisorSet, carriedOver } from '../hooks/model'
 import type { ListedAgent } from '../hooks/model'
-import type { TreeState } from '../types'
+import type { TreeAgent, TreeState } from '../types'
+import { NOW, workflowTree } from './fixture'
 
 const T = 1_000_000
 
@@ -170,6 +174,23 @@ describe('events', () => {
     const busy = turnStarted(emptyTree(T), undefined, '\n  Move the API to Rust\nsecond line', T)
     expect(busy.main).toMatchObject({ isBusy: true, prompt: 'Move the API to Rust' })
     expect(turnCompleted(busy, { reason: 'answer' }, T + 5).main.isBusy).toBe(false)
+  })
+
+  test('whose the main turn is: the person’s prompt woke it, or they typed into it; Esc or another waker quiets its end (plan 19 §5, §6)', () => {
+    const theirs = turnStarted(emptyTree(T), undefined, 'Move the API to Rust', T, true)
+    expect(theirs.main.turnByPerson).toBe(true)
+    expect(turnCompleted(theirs, { reason: 'answer' }, T + 5).main.turnQuiet).toBe(false)
+    expect(turnCompleted(theirs, { reason: 'aborted' }, T + 5).main.turnQuiet).toBe(true)
+    const woken = turnStarted(emptyTree(T), undefined, '<task-notification>…</task-notification>', T, false)
+    expect(turnCompleted(woken, { reason: 'answer' }, T + 5).main.turnQuiet).toBe(true)
+    // the person types into the woken turn: it is theirs from then
+    const joined = personInTurn(woken)
+    expect(joined.main.turnByPerson).toBe(true)
+    expect(turnCompleted(joined, { reason: 'answer' }, T + 5).main.turnQuiet).toBe(false)
+    // idle, a prompt changes nothing yet: the turn it starts takes it
+    expect(personInTurn(emptyTree(T))).toEqual(emptyTree(T))
+    // an agent's turn leaves main's alone
+    expect(turnStarted(theirs, 'a1', 'go', T, undefined).main.turnByPerson).toBe(true)
   })
 
   test('advisor calls are counted, timed and logged', () => {
@@ -324,6 +345,50 @@ describe('the context before a response', () => {
   })
 })
 
+describe('a call put to the person (plan 19 §7)', () => {
+  const working = (): TreeState => toolCalled(withAgent(), 'a1', 'Write', { file_path: 'a.txt' }, T)
+
+  test('the agent waits from the ask, logged once', () => {
+    const s = asked(working(), 'a1', 'call-1', T + 1000)
+    expect(s.agents[0]).toMatchObject({ state: 'waiting', since: T + 1000, asking: 'call-1' })
+    expect(s.log[0]).toMatchObject({ kind: 'waiting', agentId: 'a1' })
+    // The same ask again changes nothing.
+    expect(asked(s, 'a1', 'call-1', T + 2000)).toBe(s)
+  })
+
+  test('the list saying running keeps it waiting; its end ends it', () => {
+    const s = asked(working(), 'a1', 'call-1', T + 1000)
+    const still = listed(s, [row({ id: 'a1', status: 'running' })], T + 5000)
+    expect(still.agents[0]).toMatchObject({ state: 'waiting', since: T + 1000 })
+    const over = listed(still, [row({ id: 'a1', status: 'completed' })], T + 9000)
+    expect(over.agents[0]?.state).toBe('done')
+  })
+
+  test('the answer puts it back to work, and only that call does', () => {
+    const s = asked(working(), 'a1', 'call-1', T + 1000)
+    expect(answered(s, 'call-2', T + 3000)).toBe(s)
+    const back = answered(s, 'call-1', T + 4000)
+    expect(back.agents[0]).toMatchObject({ state: 'running', since: T + 4000 })
+    expect(back.agents[0]?.asking).toBeUndefined()
+    // Back at work, the list's running holds no longer.
+    const later = listed(back, [row({ id: 'a1', status: 'waiting' })], T + 5000)
+    expect(later.agents[0]?.state).toBe('waiting')
+  })
+
+  test('an ended or unknown agent is left as it is', () => {
+    const done = turnCompleted(working(), { agentId: 'a1', reason: 'answer' }, T + 10)
+    expect(asked(done, 'a1', 'call-1', T + 20)).toBe(done)
+    expect(asked(working(), 'zz', 'call-1', T + 20).agents.map(a => a.id)).toEqual(['a1'])
+  })
+
+  test('an agent already waiting keeps its time and logs nothing more', () => {
+    const waiting = listed(working(), [row({ id: 'a1', status: 'waiting' })], T + 500)
+    const s = asked(waiting, 'a1', 'call-1', T + 1000)
+    expect(s.agents[0]).toMatchObject({ state: 'waiting', since: T + 500, asking: 'call-1' })
+    expect(s.log.length).toBe(waiting.log.length)
+  })
+})
+
 describe('the agent list', () => {
   test('adds agents the events missed and maps their status', () => {
     const s = listed(emptyTree(T), [row({ id: 'b1', status: 'waiting', model: 'claude-sonnet-5-5' }), row({ id: 'b2', status: 'completed' })], T)
@@ -362,6 +427,34 @@ describe('the agent list', () => {
     expect(swapped.agents[0]).toMatchObject({ state: 'stopped', endedAt: T + 50 })
     expect(swapped.main.isBusy).toBe(false)
     expect(orphaned(busy, new Set(['a1']), T + 50).agents[0]?.state).toBe('running')
+  })
+
+  test('after a session swap, what is still at work goes on in the new tree: a run not ended whole, a listed agent at work with its record (plan 19 §8)', () => {
+    const old = workflowTree()
+    const fresh = emptyTree(NOW + 10)
+    const into = carriedOver(old, fresh, new Set(['a1']))
+    // the review run works on: it comes whole, its finished agents too, so its counts stay; the ended lint run stays behind
+    expect((into.runs ?? []).map(r => r.id)).toEqual(['wf_review'])
+    expect(into.runs?.[0]).toEqual(old.runs?.[1])
+    expect(into.agents.filter(a => a.run === 'wf_review').map(a => a.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'])
+    // a1 works and the new session's list shows it: its record comes along, not a row found anew
+    expect(into.agents.find(a => a.id === 'a1')).toMatchObject({ tools: 23, activity: 'Grep src/auth/**', startedAt: NOW - 38_000 })
+    // a2 works and w1 waits, but the list shows neither any more; the finished ones stay behind
+    expect(into.agents.filter(a => a.run === undefined).map(a => a.id)).toEqual(['a1'])
+    // the swap starts a new tree: no log comes along
+    expect(into.log).toEqual([])
+    // nothing at work: the new tree as it was
+    expect(carriedOver(emptyTree(NOW), fresh, new Set())).toBe(fresh)
+    // already in the new tree (a /resume's stored one): not twice
+    expect(carriedOver(old, into, new Set(['a1'])).agents).toHaveLength(into.agents.length)
+  })
+
+  test('after a session swap, an agent carried over brings the agent it hangs under, finished or not (plan 19 §8)', () => {
+    const old = workflowTree()
+    const child: TreeAgent = { id: 'c1', parentId: 't1', description: 'Check one test', type: 'Explore', state: 'running', since: NOW, startedAt: NOW - 5000, tools: 1 }
+    const into = carriedOver({ ...old, agents: [...old.agents, child] }, emptyTree(NOW + 10), new Set(['c1']))
+    expect(into.agents.filter(a => a.run === undefined).map(a => a.id)).toEqual(['t1', 'c1'])
+    expect(into.agents.find(a => a.id === 't1')?.state).toBe('done')
   })
 
   test('an agent that left the list while working has ended', () => {
@@ -610,6 +703,20 @@ describe('the further European languages', () => {
     expect([1, 2, 11, 21].map(n => sr.calls(n))).toEqual(['1 poziv', '2 poziva', '11 poziva', '21 poziv'])
     expect(wordsFor('sk').tools(3)).toBe('3 nástroje')
     expect(wordsFor('fi').calls(2)).toBe('2 kutsua')
+  })
+
+  test('Croatian (plan 19 §12): read from its code, locale or name; counts as its grammar does; its own words, not Serbian ones', () => {
+    expect(['hr-HR', 'hr', 'hrv', 'Croatian', 'hrvatski'].map(langOf)).toEqual(['hr', 'hr', 'hr', 'hr', 'hr'])
+    const hr = wordsFor('hr')
+    expect(hr.lang).toBe('hr')
+    expect([1, 2, 5, 11, 21, 22].map(n => hr.calls(n))).toEqual(['1 poziv', '2 poziva', '5 poziva', '11 poziva', '21 poziv', '22 poziva'])
+    expect([1, 4, 11].map(n => hr.tools(n))).toEqual(['1 alat', '4 alata', '11 alata'])
+    // ijekavian, and the Croatian words where Serbian has its own
+    expect(ago(130_000, 'hr')).toBe('prije 2min')
+    expect(hr.daysLong[3]).toBe('srijeda')
+    expect(hr.options.title).toBe('Postavke')
+    expect(hr.options.labels.notify).toBe('Obavijesti')
+    expect(wordsFor('sr').options.title).toBe('Podešavanja')
   })
 
   test('their times', () => {

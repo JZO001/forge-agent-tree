@@ -30,15 +30,31 @@ export const NOTICE_OPTION: Readonly<Record<NoticeEvent, OptionField>> = {
   alert: 'notifyAlert',
 }
 
-/** One kind at most this often; what comes meanwhile waits and goes out merged into one. */
-export const NOTICE_GAP_MS = 30_000
+/**
+ * One kind at most this often, in seconds, as the notifications page offers it
+ * (the `noticeGap` option; plan 19 §4): what comes meanwhile waits and goes out
+ * merged into one. 0 sends each at once.
+ */
+export const NOTICE_GAPS: readonly number[] = [0, 5, 10, 20, 30, 60]
+/** The gap by default, in seconds (the user's decision of 2026-11-23; it was a fixed 30 s). */
+export const NOTICE_GAP_S = 10
+export const NOTICE_GAP_MS = NOTICE_GAP_S * 1000
 /**
  * How long a host (the desktop app, a remote client) holds one before raising
  * it; it drops it when the person comes back first (`untilBack`), so it only
  * reaches someone who left. A terminal has no such thing and sends at once.
- * Shorter than the gap, so a newer one of a kind never replaces one still held.
+ * A gap shorter than this shortens it (`noticeDelay`).
  */
 export const NOTICE_DELAY_MS = 20_000
+
+/**
+ * How long a host holds one, for a gap of `gapMs`: no longer than the gap, so
+ * a newer one of a kind never replaces one still held (plan 19 §4, question 5).
+ * With no gap (each at once) it keeps its 20 s, and a host shows the newest.
+ */
+export function noticeDelay(gapMs: number): number {
+  return gapMs > 0 ? Math.min(NOTICE_DELAY_MS, gapMs) : NOTICE_DELAY_MS
+}
 /** A name in a notification at most this many cells; the whole text at most `TEXT_CELLS`. */
 const ITEM_CELLS = 48
 const TEXT_CELLS = 200
@@ -94,8 +110,8 @@ function alertItem(s: TreeState, w: Words, thresholds: LimitThresholds = LIMIT_T
 
 /**
  * The notifications that go out now, and what waits (the user's decision of
- * 2026-11-20: a kind at most every 30 s, what comes meanwhile merged into the
- * next). A raised kind switched on joins what waits of it (a name once); the
+ * 2026-11-20: a kind at most every `gapMs`, what comes meanwhile merged into the
+ * next; the gap an option since 2026-11-23, 10 s by default). A raised kind switched on joins what waits of it (a name once); the
  * main turn's end and the alert keep only the latest. A kind goes out once its
  * gap since its last one has passed; a kind switched off is dropped.
  */
@@ -105,6 +121,7 @@ export function nextNotices(
   on: (e: NoticeEvent) => boolean,
   last: Readonly<Partial<Record<NoticeEvent, number>>>,
   now: number,
+  gapMs: number = NOTICE_GAP_MS,
 ): { queue: NoticeQueue; send: Notice[] } {
   const waiting: NoticeQueue = {}
   for (const e of NOTICE_EVENTS) {
@@ -121,7 +138,7 @@ export function nextNotices(
   for (const e of NOTICE_EVENTS) {
     const items = waiting[e]
     if (!items) continue
-    if (now - (last[e] ?? -Infinity) >= NOTICE_GAP_MS) send.push({ event: e, items })
+    if (now - (last[e] ?? -Infinity) >= gapMs) send.push({ event: e, items })
     else rest[e] = items
   }
   return { queue: rest, send }

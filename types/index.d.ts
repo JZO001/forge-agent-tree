@@ -49,6 +49,8 @@ export type TreeAgent = {
   listed?: boolean
   /** How many times this agent asked the advisor. */
   advisorCalls?: number
+  /** The call (`tool_use_id`) put to the person, which the agent waits on (a permission dialog; plan 19 §7). */
+  asking?: string
 }
 
 /** How a workflow run ended, as its notification says. */
@@ -98,6 +100,15 @@ export type TreeMain = {
   isBusy: boolean
   turnStartedAt?: number
   turnEndedAt?: number
+  /**
+   * Whether the person started the current or last main turn: their own prompt
+   * (typed, from Remote Control, or -p's) woke it, or they typed into it while it
+   * ran. False for one a background task's notification, a scheduled prompt or
+   * another session woke (plan 19 §6); unknown where the mod did not see it start.
+   */
+  turnByPerson?: boolean
+  /** The last main turn's end tells nothing (no sound, no notification): the person pressed Esc, or did not start it (plan 19 §5, §6). */
+  turnQuiet?: boolean
   contextPercent?: number
   contextTokens?: number
   contextWindow?: number
@@ -255,6 +266,7 @@ export type Lang =
   | 'sk'
   | 'sl'
   | 'sr'
+  | 'hr'
   | 'fi'
   | 'sv'
   | 'tr'

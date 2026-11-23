@@ -1097,7 +1097,8 @@ describe('a message to a subagent', () => {
 
 describe('the further languages', () => {
   test('the language panel offers them all, each in its own name, and fits the narrowest pane', () => {
-    expect(LANGS.map(l => l.code)).toEqual(['en', 'hu', 'cs', 'da', 'de', 'es', 'fr', 'it', 'nl', 'no', 'pl', 'pt', 'ro', 'sk', 'sl', 'sr', 'fi', 'sv', 'tr', 'el', 'ja', 'ko', 'zh'])
+    // Croatian (`Hrvatski`) by its own name among the Latin-script ones (plan 19 §12): 24 in all
+    expect(LANGS.map(l => l.code)).toEqual(['en', 'hu', 'cs', 'da', 'de', 'es', 'fr', 'hr', 'it', 'nl', 'no', 'pl', 'pt', 'ro', 'sk', 'sl', 'sr', 'fi', 'sv', 'tr', 'el', 'ja', 'ko', 'zh'])
     for (const cols of [36, 56]) {
       const rows = layout(busyTree(), { ...UI, picker: 'lang' }, { cols, now: NOW, frame: 0, animate: false })
       const text = rows.map(lineOf).join('\n')
@@ -1179,34 +1180,80 @@ describe('the options', () => {
 describe('the line above the prompt', () => {
   const lineText = (parts: ReturnType<typeof bandLine>) => parts.map(p => p.text).join(BAND_GAP)
 
-  test("is built as token-weather's: a colored lead, a bold count, plain counts, the signs in runs, a dim tail", () => {
+  test("is token-weather's line (plan 19 §2): the weather in its color, the share bold, the tokens, our context bar where its chart is, the change dim; then the agents at work", () => {
     const parts = bandLine(busyTree(), 120, { frame: 0, animate: true })
-    expect(parts.map(p => p.text)).toEqual(['⠋ Opus 5.5', '2 running', '1 waiting · 4 done · 1 failed', parts[3]!.text, '◆3 · ≈$1.84'])
-    expect(parts[0]!.style).toEqual({ color: 'claude' })
+    expect(parts.map(p => p.text)).toEqual(['☁ Cloudy', '47%', '94.0k / 200k', parts[3]!.text, '▲ +23.7k last turn', '⠋ 2 running · 1 waiting'])
+    expect(parts[0]!.style).toEqual({ color: 'cyan' })
     expect(parts[1]!.style).toEqual({ bold: true })
     expect(parts[2]!.style).toEqual({})
     expect(parts[4]!.style).toEqual({ dimColor: true })
-    const signs = parts[3]!
-    expect(signs.runs?.map(r => r.text).join('')).toBe(signs.text)
-    expect(signs.text).toContain('●●')
-    expect(signs.text).toContain('‖')
-    expect(signs.text).toContain('✗')
-    expect(signs.runs?.find(r => r.text.includes('●'))?.style).toEqual({ color: 'success' })
-    expect(signs.runs?.find(r => r.text.includes('✗'))?.style).toEqual({ color: 'error' })
+    // the bar: 10 cells, the fill in the weather's color, the rest dim
+    const meter = parts[3]!
+    expect(width(meter.text)).toBe(10)
+    expect(meter.runs?.map(r => r.text).join('')).toBe(meter.text)
+    expect(meter.runs?.some(r => r.style.color === 'cyan')).toBe(true)
+    expect(meter.runs?.at(-1)?.style).toEqual({ dimColor: true })
+    // the agents' part: the spinner in the working agent's model color, the counts bold
+    expect(parts[5]!.runs).toEqual([{ text: '⠋', style: { color: 'success' } }, { text: ' 2 running · 1 waiting', style: { bold: true } }])
   })
 
-  test('gives way from the end as the line narrows: the signs, the tail, the counts', () => {
+  test('the bar’s light runs left to right, a cell a frame; with motion off it stands', () => {
+    const lit = (frame: number, animate = true) => {
+      const runs = bandLine(busyTree(), 120, { frame, animate })[3]!.runs ?? []
+      const i = runs.findIndex(r => r.style.color === 'cyanBright')
+      return i < 0 ? -1 : runs.slice(0, i).reduce((n, r) => n + width(r.text), 0)
+    }
+    // 47%: four full cells, so the light walks them, then starts again at the left
+    expect([0, 1, 2, 3, 4].map(f => lit(f))).toEqual([0, 1, 2, 3, 0])
+    expect(lit(2, false)).toBe(-1)
+  })
+
+  test('gives way from the end as the line narrows: the agents, the words “last turn”, the bar, the change, the tokens', () => {
     const at = (cols: number) => bandLine(busyTree(), cols, { frame: 0, animate: true })
-    for (const cols of [24, 36, 44, 56, 72, 120]) expect(width(lineText(at(cols))) <= cols || at(cols).length === 1, `${cols}`).toBe(true)
-    expect(lineText(at(70))).toBe('⠋ Opus 5.5  2 running  1 waiting · 4 done · 1 failed  ◆3 · ≈$1.84')
-    expect(lineText(at(56))).toBe('⠋ Opus 5.5  2 running  1 waiting · 4 done · 1 failed')
-    expect(lineText(at(30))).toBe('⠋ Opus 5.5  2 running')
+    for (const cols of [24, 36, 44, 56, 72, 120]) expect(width(lineText(at(cols))) <= cols || at(cols).length === 2, `${cols}`).toBe(true)
+    const texts = (cols: number) => at(cols).map(p => p.text)
+    expect(texts(70)).toEqual(['☁ Cloudy', '47%', '94.0k / 200k', at(70)[3]!.text, '▲ +23.7k last turn'])
+    expect(texts(52)).toEqual(['☁ Cloudy', '47%', '94.0k / 200k', at(52)[3]!.text, '▲ +23.7k'])
+    expect(texts(40)).toEqual(['☁ Cloudy', '47%', '94.0k / 200k', '▲ +23.7k'])
+    expect(texts(30)).toEqual(['☁ Cloudy', '47%', '94.0k / 200k'])
+    expect(texts(20)).toEqual(['☁ Cloudy', '47%'])
   })
 
-  test('idle with no agents: the model and idle, in the pane language too', () => {
-    const quiet = { ...emptyTree(NOW), main: { ...emptyTree(NOW).main, model: 'claude-sonnet-5-5' } }
-    expect(lineText(bandLine(quiet, 80, { frame: 0, animate: true }))).toBe('○ Sonnet 5.5  idle')
-    expect(lineText(bandLine(busyTree(), 56, { frame: 0, animate: false, lang: 'hu' }))).toMatch(/^● Opus 5\.5  2 fut  1 vár · 4 kész · 1 hibás/)
+  test('the weather in the pane’s language, its sign’s own room kept; an estimate marked ~, with no change yet', () => {
+    const hu = bandLine(busyTree(), 120, { frame: 0, animate: false, lang: 'hu' })
+    expect(hu.map(p => p.text).filter((_, i) => i !== 3)).toEqual(['☁ Felhős', '47%', '94.0k / 200k', '▲ +23.7k előző kör', '● 2 fut · 1 vár'])
+    const at = (p: number) => bandLine({ ...busyTree(), main: { ...busyTree().main, contextPercent: p } }, 120, { frame: 0, animate: false })[0]!
+    expect(at(10)).toEqual({ text: '☀ Clear', style: { color: 'yellow' } })
+    expect(at(80)).toEqual({ text: '☇ Storm', style: { color: 'magenta' } })
+    expect(at(95)).toEqual({ text: '↯ Compact soon', style: { color: 'red' } })
+    const guess = bandLine({ ...busyTree(), main: { ...busyTree().main, contextEstimated: true } }, 120, { frame: 0, animate: false })
+    expect(guess.map(p => p.text).filter((_, i) => i !== 3)).toEqual(['☁ Cloudy', '~47%', '~94.0k / 200k', '● 2 running · 1 waiting'])
+  })
+
+  test('nothing at work: no agents’ part; no context known: the agents’ part alone, or no line', () => {
+    const quiet: TreeState = { ...busyTree(), agents: busyTree().agents.filter(a => a.state !== 'running' && a.state !== 'waiting') }
+    expect(bandLine(quiet, 120, { frame: 0, animate: false }).at(-1)?.text).toBe('▲ +23.7k last turn')
+    const blind = (s: TreeState): TreeState => ({ ...s, main: { ...s.main, contextPercent: undefined } })
+    expect(lineText(bandLine(blind(busyTree()), 120, { frame: 0, animate: false }))).toBe('● 2 running · 1 waiting')
+    expect(bandLine(blind(quiet), 120, { frame: 0, animate: false })).toEqual([])
+    // only one waits: its sign, yellow
+    const one: TreeState = { ...quiet, agents: [...quiet.agents, busyTree().agents.find(a => a.state === 'waiting')!] }
+    expect(bandLine(one, 120, { frame: 0, animate: false }).at(-1)?.runs?.[0]).toEqual({ text: '‖', style: { color: 'warning' } })
+  })
+
+  test('with token-weather’s own row in the band, only the agents’ part: the two never say the same twice (plan 19 §2)', () => {
+    expect(lineText(bandLine(busyTree(), 120, { frame: 0, animate: false, weatherShown: true }))).toBe('● 2 running · 1 waiting')
+    const quiet: TreeState = { ...busyTree(), agents: [] }
+    expect(bandLine(quiet, 120, { frame: 0, animate: false, weatherShown: true })).toEqual([])
+  })
+
+  test('fits every width in every language', () => {
+    for (const l of LANGS) {
+      for (const cols of [24, 36, 44, 56, 72, 120]) {
+        const parts = bandLine(busyTree(), cols, { frame: 0, animate: false, lang: l.code })
+        expect(width(lineText(parts)) <= cols || parts.length === 2, `${l.code} ${cols}`).toBe(true)
+      }
+    }
   })
 })
 
@@ -1293,9 +1340,6 @@ describe('workflow runs', () => {
     }
     const rows = rowsOf(UI, 56, undefined, settled)
     expect(segOf(rows.find(r => lineOf(r).includes('▣ review-changes')), '▣')).toMatchObject({ color: 'error' })
-    const band = bandLine(settled, 120, { frame: 0, animate: false })
-    const signs = band.find(p => p.runs !== undefined)
-    expect(signs?.runs?.find(r => r.text.includes('▣') && r.style.color === 'error')).toBeDefined()
   })
 
   test('the counts each in a color, none gray: done green, at work in the model color, failed red, waiting and stopped yellow', () => {
@@ -1353,14 +1397,6 @@ describe('workflow runs', () => {
     const hu = rowsOf(HU).map(lineOf)
     expect(hu.some(l => /▣ review-changes +elindult$/.test(l))).toBe(true)
     expect(hu.some(l => new RegExp(`▣ lint-sweep +${wordsFor('hu').legend.done} · × 3 +40mp$`).test(l))).toBe(true)
-  })
-
-  test('the line above the prompt: one sign for a run, not one for each of its agents', () => {
-    const parts = bandLine(workflowTree(), 120, { frame: 0, animate: false })
-    const signs = parts.find(p => p.runs)
-    expect(signs?.text).toBe('✓✓✓●●‖✓✗▣▣')
-    expect(signs?.runs?.at(-1)).toEqual({ text: '▣', style: {} })
-    expect(signs?.runs?.at(-2)).toEqual({ text: '▣', style: { dimColor: true } })
   })
 
   test('every line in the tree carries a light of its own, as the trunk does (the user\'s rule)', () => {
@@ -1994,7 +2030,33 @@ describe('the notifications page (plan 12)', () => {
     const lines = page({ ...NOTICES, lang: 'hu' }).map(lineOf)
     expect(lines[1]).toBe('Értesítések')
     expect(lines.find(l => l.startsWith('Agent vár'))).toMatch(/^Agent vár +► +be$/)
+    expect(lines.find(l => l.startsWith('Szünet'))).toMatch(/^Szünet +− 10mp \+$/)
     expect(lines.at(-2)).toBe('► most küld egy próbát')
+  })
+
+  test('after the events, the gap: `− 10s +`, the time in the times’ color, the buttons walking 0 · 5 · 10 · 20 · 30 · 60 s (plan 19 §4)', () => {
+    const rows = page()
+    const lines = rows.map(lineOf)
+    const gap = lines.findIndex(l => l.startsWith('Gap'))
+    expect(lines[gap]).toMatch(/^Gap +− 10s \+$/)
+    expect(lines[gap + 1]).toBe('  one of a kind at most this often; the rest merged')
+    // after the last event, before the note
+    expect(gap).toBeGreaterThan(lines.findIndex(l => l.startsWith('Red alert')))
+    const segs = rows[gap]!.kind !== 'keys' ? rows[gap]!.segs : []
+    expect(segs.find(x => x.text === '10s')?.color).toBe(TIME_COLOR)
+    expect(segs.find(x => x.key === 'option:noticeGap:down')?.press).toEqual({ kind: 'option', field: 'noticeGap', value: 5 })
+    expect(segs.find(x => x.key === 'option:noticeGap:up')?.press).toEqual({ kind: 'option', field: 'noticeGap', value: 20 })
+    const at = (n: number) => page(NOTICES, 56, undefined, { values: { ...DEFAULT_SETTINGS, noticeGap: n } })
+    const segsAt = (n: number) => at(n).flatMap(r => (r.kind !== 'keys' && lineOf(r).startsWith('Gap') ? r.segs : []))
+    // 0 is off, no time; nothing lower
+    expect(at(0).map(lineOf).find(l => l.startsWith('Gap'))).toMatch(/^Gap +− off \+$/)
+    expect(segsAt(0).find(x => x.key === 'option:noticeGap:down')).toBeUndefined()
+    expect(segsAt(0).find(x => x.key === 'option:noticeGap:up')?.press).toMatchObject({ value: 5 })
+    // 60 s the last; one set in /config off the list steps to its neighbours
+    expect(at(60).map(lineOf).find(l => l.startsWith('Gap'))).toMatch(/^Gap +− 1m00s \+$/)
+    expect(segsAt(60).find(x => x.key === 'option:noticeGap:up')).toBeUndefined()
+    expect(segsAt(15).find(x => x.key === 'option:noticeGap:down')?.press).toMatchObject({ value: 10 })
+    expect(segsAt(15).find(x => x.key === 'option:noticeGap:up')?.press).toMatchObject({ value: 20 })
   })
 
   test('it fits every width in every language; a short pane drops the lines about them, then the note', () => {
@@ -2092,7 +2154,7 @@ describe('the whole tree a page at a time (plan 13)', () => {
   test('pressing `+ n more` opens it; until then the rows that matter most stay', () => {
     const plain = draw(undefined)
     const more = plain.find(r => r.kind === 'press' && r.key === 'more')
-    expect(more?.kind === 'press' && more.press).toEqual({ kind: 'treeAt', at: 0 })
+    expect(more?.kind === 'press' && more.press).toEqual({ kind: 'treeAt', at: 0, focus: 'tree:down' })
     expect(lineOf(more!)).toMatch(/^└─ \+ \d+ more/)
     expect(pager(plain)).toBeUndefined()
     // `+ n finished` still shows the finished agents, as `f` does
@@ -2114,19 +2176,41 @@ describe('the whole tree a page at a time (plan 13)', () => {
     expect(lineOf(pager(first)!)).toMatch(new RegExp(`^▲  ▼  1–${size} / ${order.length} +×$`))
     expect(segOf(pager(first), 'tree:up')).toBeUndefined()
     expect(segsOf(pager(first)).find(x => x.text === '▲')?.dim).toBe(true)
-    expect(segOf(pager(first), 'tree:down')?.press).toEqual({ kind: 'treeAt', at: size - 1 })
+    expect(segOf(pager(first), 'tree:down')?.press).toEqual({ kind: 'treeAt', at: size - 1, focus: 2 * size - 1 < order.length ? 'tree:down' : 'tree:up' })
     // the next page starts with the last row of this one
     const second = draw(size - 1)
     expect(who(second)).toEqual(order.slice(size - 1, 2 * size - 1))
     expect(who(second)[0]).toBe(shown.at(-1))
-    expect(segOf(pager(second), 'tree:up')?.press).toEqual({ kind: 'treeAt', at: 0 })
+    expect(segOf(pager(second), 'tree:up')?.press).toEqual({ kind: 'treeAt', at: 0, focus: 'tree:down' })
     // the last page, however far one asks: ▼ dim
     const last = draw(999)
     expect(who(last)).toEqual(order.slice(order.length - size))
     expect(segOf(pager(last), 'tree:down')).toBeUndefined()
     expect(lineOf(pager(last)!)).toMatch(new RegExp(`^▲  ▼  ${order.length - size + 1}–${order.length} / ${order.length} +×$`))
     // × goes back to the rows that matter most
-    expect(segOf(pager(first), 'tree:close')?.press).toEqual({ kind: 'treeAt' })
+    expect(segOf(pager(first), 'tree:close')?.press).toEqual({ kind: 'treeAt', focus: 'more' })
+  })
+
+  test('after a paging press the focus ring stays on the arrow while it still leads somewhere, else goes to the other (plan 19 §3)', () => {
+    const order = who(draw(undefined, 1000))
+    // a pane short enough for three pages at least
+    const rows = [22, 20, 18].find(h => {
+      const size = who(draw(0, h)).length
+      return size >= 3 && order.length - size >= 2 * (size - 1)
+    })!
+    expect(rows).toBeDefined()
+    const at = (treeAt: number) => pager(draw(treeAt, rows))
+    const size = who(draw(0, rows)).length
+    const step = size - 1
+    const lastAt = order.length - size
+    // ▼ from the first page to a middle one: ▼ leads on, the ring stays
+    expect(segOf(at(0), 'tree:down')?.press).toMatchObject({ at: step, focus: 'tree:down' })
+    // ▲ from a page two down: not at the top yet, the ring stays on ▲
+    expect(segOf(at(2 * step), 'tree:up')?.press).toMatchObject({ at: step, focus: 'tree:up' })
+    // ▼ onto the last page: ▼ dims there, so the ring goes to ▲
+    expect(segOf(at(lastAt - 1), 'tree:down')?.press).toMatchObject({ at: lastAt, focus: 'tree:up' })
+    // ▲ onto the first page: ▲ dims there, so the ring goes to ▼
+    expect(segOf(at(step), 'tree:up')?.press).toMatchObject({ at: 0, focus: 'tree:down' })
   })
 
   test('the lines keep their place in the tree: a run’s agents hang under it in the window too', () => {

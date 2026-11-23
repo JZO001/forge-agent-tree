@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-tree",
   "displayName": "Agent Tree // Forge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Side pane that shows the session's agents as a live tree: models, status, activity, context, advisor calls and a short event log. Switch the session's model, effort and advisor from the pane, choose what new subagents get, and switch a running one; in 23 languages.",
   "author": {
     "name": "Zoltan Juhasz"
@@ -154,6 +154,12 @@
       "title": "Notify: red alert",
       "description": "When the context reaches 90% or a limit its red mark (with Notifications on)",
       "default": true
+    },
+    "noticeGap": {
+      "type": "number",
+      "title": "Notification gap",
+      "description": "Seconds between two notifications of a kind; what comes meanwhile is merged into the next (0 sends each at once; the notifications page offers 0, 5, 10, 20, 30 and 60)",
+      "default": 10
     },
     "autoUpdate": {
       "type": "boolean",

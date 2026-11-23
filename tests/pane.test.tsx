@@ -975,11 +975,20 @@ function band(cols: number) {
   } as const
 }
 
-test('with the pane closed, a line above the prompt sums up the agents', async ($, on) => {
+test('with the pane closed, a line above the prompt as token-weather’s, then the agents at work (plan 19 §2)', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', percent: 20 }
+  const { clock } = await session($, on, [], world)
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...band(100), surface: 'terminal' })
+  expect(await ui.find({ text: /^☀ Clear {2}20% {2}40\.0k \/ 200k {2}\S{10} {2}\S 1 running$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('no context known yet: only the agents at work on the line', async ($, on) => {
   const { clock } = await session($, on)
   await clock.advance(500)
   const ui = await $.ui.mount({ ...band(100), surface: 'terminal' })
-  expect(await ui.find({ text: /Opus 5\.5 {2}1 running/ })).toBeDefined()
+  expect(await ui.find({ text: /^\S 1 running$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1429,10 +1438,11 @@ test('an agent that starts waiting is notified through the person’s channel: t
   expect(notified).toEqual([])
   agents[0] = explorer('waiting')
   await clock.advance(1500)
-  expect(notified).toEqual([{ text: 'Agent waiting: Find auth handlers', title: 'Agent Tree // Forge', key: 'forge:waiting', delayMs: 20_000, untilBack: true }])
+  // a host holds it no longer than the gap (10 s by default; plan 19 §4)
+  expect(notified).toEqual([{ text: 'Agent waiting: Find auth handlers', title: 'Agent Tree // Forge', key: 'forge:waiting', delayMs: 10_000, untilBack: true }])
 })
 
-test('a failure and the main turn’s end, each at once; another failure within 30 s waits, then goes out', async ($, on) => {
+test('a failure and the main turn’s end, each at once; another failure within the gap (10 s by default) waits, then goes out', async ($, on) => {
   const { clock, notified } = await session($, on)
   await failAndFinish($, clock)
   await clock.advance(1000)
@@ -1442,8 +1452,52 @@ test('a failure and the main turn’s end, each at once; another failure within 
   await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
   await clock.advance(5000)
   expect(notified).toHaveLength(2)
-  await clock.advance(30_000)
+  // past the 10 s gap, at the ticker's idle pace (3 s) at most
+  await clock.advance(7000)
   expect(notified.map(n => n.text).slice(2)).toEqual(['Failure: Check routes'])
+})
+
+test('with a gap of 30 s set, another failure waits the whole of it (plan 19 §4)', { options: { noticeGap: 30 } }, async ($, on) => {
+  const { clock, notified } = await session($, on)
+  await failAndFinish($, clock)
+  await clock.advance(1000)
+  expect(notified).toHaveLength(2)
+  // a host holds each 20 s: no longer than the gap
+  expect(notified[0]?.delayMs).toBe(20_000)
+  await spawn($)
+  await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 'y', agentId: 'a2', reason: 'error' })
+  await clock.advance(15_000)
+  expect(notified).toHaveLength(2)
+  await clock.advance(18_000)
+  expect(notified.map(n => n.text).slice(2)).toEqual(['Failure: Check routes'])
+})
+
+test('a main turn ended with Esc, or one a task’s notification woke, tells nothing; one the person typed into does (plan 19 §5, §6)', async ($, on) => {
+  const { clock, notified } = await session($, on)
+  // Esc: the person is right there
+  await $.prompt.submit({ text: 'Move the API to Rust', wait: false, origin: { kind: 'composer' }, turnId: 'm1' })
+  await $.turn.start({ text: 'Move the API to Rust', turnId: 'm1' })
+  await clock.advance(500)
+  await $.turn.complete({ answer: '', durationMs: 400, isAborted: true, turnId: 'm1', reason: 'aborted' })
+  await clock.advance(1000)
+  expect(notified).toEqual([])
+  // a background task's notification wakes main: its end is not the person's
+  const wake = '<task-notification>\n<task-id>x</task-id>\n<status>completed</status>\n</task-notification>'
+  await $.prompt.submit({ text: wake, wait: false, origin: { kind: 'task-notification' } })
+  await $.turn.start({ text: wake, turnId: 'm2' })
+  await clock.advance(500)
+  await $.turn.complete({ answer: 'ok', durationMs: 400, isAborted: false, turnId: 'm2', reason: 'answer' })
+  await clock.advance(1000)
+  expect(notified).toEqual([])
+  // woken again, and the person types into it while it runs: theirs from then
+  await $.prompt.submit({ text: wake, wait: false, origin: { kind: 'task-notification' } })
+  await $.turn.start({ text: wake, turnId: 'm3' })
+  await clock.advance(500)
+  await $.prompt.submit({ text: 'also check the tests', wait: false, origin: { kind: 'composer' }, turnId: 'm3' })
+  await clock.advance(500)
+  await $.turn.complete({ answer: 'ok', durationMs: 900, isAborted: false, turnId: 'm3', reason: 'answer' })
+  await clock.advance(1000)
+  expect(notified.map(n => n.text)).toEqual(['Turn complete: also check the tests'])
 })
 
 test('with Notifications off nothing is notified', { options: { notify: false } }, async ($, on) => {
@@ -1609,6 +1663,8 @@ test('a subagent that fails at once still sounds its failure', { options: { soun
 
 test('two at once: the more important sounds first, the other after it', { options: { soundBoot: false } }, async ($, on) => {
   const { clock, sounds } = await session($, on, [], { id: 's1', model: 'claude-opus-5-5', sysname: 'Darwin' })
+  // the person's prompt starts the turn: only such a turn's end sounds (plan 19 §6)
+  await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' }, turnId: 'm1' })
   await $.turn.start({ text: 'go', turnId: 'm1' })
   await clock.advance(500)
   // the main turn ends as the explorer fails
@@ -1682,6 +1738,35 @@ test('a session swap is silent: what the new session already holds sounds nothin
   expect(notified).toEqual([])
 })
 
+test('a /clear while a workflow runs: the run goes on in the new tree whole, its agent at work ends there, the next joins it (plan 19 §8)', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5', workflow: { runId: 'wf_r', taskId: 'tk1', workflowName: 'review-changes', summary: 'Review the diff' } }
+  const { clock } = await session($, on, [], world)
+  await $.tool.call({ tool: 'Workflow', script: "export const meta = { name: 'review-changes', description: 'Review the diff' }", tool_use_id: 'tu_wf' })
+  await clock.advance(10)
+  await member($, 'verify:auth.ts', 1)
+  await member($, 'verify:db.ts', 2)
+  // the first one (a2) ends in the old session
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'x', agentId: 'a2', reason: 'answer' })
+  await clock.advance(1000)
+  // the /clear: another session in place, a3 still at work (a workflow's agents are never in the agent list)
+  world.id = 's2'
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  await clock.advance(4000)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  expect(await ui.find({ text: /▣ review-changes  \d\d:\d\d +× 2  1✓ 1. / })).toBeDefined()
+  expect(await ui.find({ text: /verify:db\.ts/ })).toBeDefined()
+  // a3 ends in the new session, and the next agent of the run joins it there
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'y', agentId: 'a3', reason: 'answer' })
+  await member($, 'verify:cli.ts', 3)
+  await clock.advance(1000)
+  expect(await ui.find({ text: /▣ review-changes  \d\d:\d\d +× 3  2✓ 1. / })).toBeDefined()
+  await ui.press({ key: 'run:wf_r' })
+  expect(await ui.find({ text: /verify:auth\.ts/ })).toBeDefined()
+  expect(await ui.find({ text: /verify:db\.ts/ })).toBeDefined()
+  expect(await ui.find({ text: /verify:cli\.ts/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('with Motion off nothing moves: an agent at work shows a still sign', { options: { animate: false } }, async ($, on) => {
   const { clock } = await session($, on)
   const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
@@ -1697,6 +1782,18 @@ test('reduced motion set while the session runs stops the motion within seconds'
   expect(await ui.find({ text: /[├└]─ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Find auth handlers/ })).toBeDefined()
   world.settings = { prefersReducedMotion: true }
   await clock.advance(11_000)
+  expect(await ui.find({ text: /[├└]─ ● Find auth handlers/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the look is read every second, idle too: a /theme or reduced motion reaches the pane within one (plan 19 §1)', async ($, on) => {
+  const world: World = { id: 's1', model: 'claude-opus-5-5' }
+  const { clock } = await session($, on, [], world)
+  const ui = await $.ui.mount({ ...pane(56), surface: 'terminal' })
+  await clock.advance(11_000)
+  expect(await ui.find({ text: /[├└]─ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Find auth handlers/ })).toBeDefined()
+  world.settings = { prefersReducedMotion: true }
+  await clock.advance(1200)
   expect(await ui.find({ text: /[├└]─ ● Find auth handlers/ })).toBeDefined()
   await ui.unmount()
 })

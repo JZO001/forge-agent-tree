@@ -10,7 +10,7 @@
 **Where and with what**
 - Claude Code 2.1.328 or newer, in its terminal interface, on Windows, macOS or Linux. It runs on Claude Code's mods API, which is early access and may change between releases.
 - The pane docks beside the chat in fullscreen mode when the terminal is wide enough (about 110 columns); otherwise `/tree` opens it (see [The pane does not show up?](#the-pane-does-not-show-up-type-tree)).
-- Its interface speaks 23 languages. It comes in a sci-fi look, the Forge HUD, or a classic one, with optional sounds and notifications.
+- Its interface speaks 24 languages. It comes in a sci-fi look, the Forge HUD, or a classic one, with optional sounds and notifications.
 
 It watches, and changes nothing unless you pick something in the pane. It makes no model calls, and its only network call is a daily check for its own update, which you can switch off (see [Updates](#updates) and [PRIVACY.md](PRIVACY.md)).
 
@@ -72,7 +72,7 @@ Every other hook passes its event on unchanged, and so does a fault in the mod.
 
 It comes in a sci-fi look, the **Forge HUD**: a title bar with a status lamp, labelled rails between the groups, LED bars, the main session as a violet core at the tree's root, panels in corner brackets, a neon palette and a navy plate on a dark theme. And it moves: a comet runs down every line of the tree, the core beats while Claude works, new log rows type themselves in, a new agent's name materialises, a finished one flashes, a failed one glitches, panels unfold, a scan line passes, a radar sweeps an empty tree, and the pane boots up the first time it opens. The classic look is one option away, and the Motion option stills all of it. It can also play **sci-fi sounds** for what happens: an advisor call, an agent starting, finishing, failing or waiting, the end of a turn, a red alert, the pane powering up. They are on by default, but for the advisor's call and a new agent's start; every one has its own switch.
 
-It also sends **notifications** through Claude Code's own notification channel, so they reach you away from the terminal too: when an agent waits for you, an agent or a workflow run fails, a workflow run finishes, the main answer is done, or a red alert rises. A kind comes at most every 30 seconds; what comes meanwhile is merged into the next one. In the Claude desktop app a notification shows only if you have not come back to the session within 20 seconds; a terminal shows it at once, as its notification channel allows. Where Claude Code has no channel in the terminal (Windows Terminal, for one), on Windows the mod shows it as a Windows notification itself (see [Notifications on Windows](#notifications-on-windows)). They are on by default, and every one has its own switch; the notifications page shows what came of the last one.
+It also sends **notifications** through Claude Code's own notification channel, so they reach you away from the terminal too: when an agent waits for you, an agent or a workflow run fails, a workflow run finishes, the main answer to your prompt is done (not when you stopped it with Esc, nor for a turn a background task woke), or a red alert rises. A kind comes at most every 10 seconds (the Gap setting on the notifications page: off, 5, 10, 20, 30 or 60 seconds); what comes meanwhile is merged into the next one. In the Claude desktop app a notification shows only if you have not come back to the session within 20 seconds (or the gap, where that is shorter); a terminal shows it at once, as its notification channel allows. Where Claude Code has no channel in the terminal (Windows Terminal, for one), on Windows the mod shows it as a Windows notification itself (see [Notifications on Windows](#notifications-on-windows)). They are on by default, and every one has its own switch; the notifications page shows what came of the last one.
 
 ## Notifications on Windows
 
@@ -152,8 +152,8 @@ These are set on the pane's options page (`o`) or from `/config`; both save them
 | Limits: yellow from | 60 | The share (%) from which the session or all-models bar turns yellow, and the HUD's lamp shows CAUTION |
 | Limits: red from | 90 | The share (%) from which it turns red, and the lamp shows CRITICAL; above the yellow one |
 | Sound | on | Every sound of the pane at once; each event has its own switch on the sounds page: agent done, agent failed, agent waiting, turn complete, red alert and power-up are on, advisor call and agent deployed are off. macOS plays them itself, Windows through PowerShell, Linux through `paplay` or `aplay` |
-| Notifications | on | Every notification at once, through Claude Code's notification channel (`/config`); each event has its own switch on the notifications page, all on: agent waiting, failure, workflow done, turn complete, red alert. The text names the agent, the workflow run or the start of your prompt. On Windows, where Claude Code has no channel in the terminal, the mod shows it as a Windows notification through PowerShell (see [Notifications on Windows](#notifications-on-windows)) |
-| Line above the prompt | on | While the pane is closed, a line above the prompt sums up the agents, drawn as token-weather draws its own: `⠹ Opus 5.5  2 running  1 waiting · 4 done  ●●‖✓✗  ◆3 · ≈$1.84` |
+| Notifications | on | Every notification at once, through Claude Code's notification channel (`/config`); each event has its own switch on the notifications page, all on: agent waiting, failure, workflow done, turn complete, red alert; and the Gap there, 10 seconds by default, is how often one kind comes at most. The text names the agent, the workflow run or the start of your prompt. On Windows, where Claude Code has no channel in the terminal, the mod shows it as a Windows notification through PowerShell (see [Notifications on Windows](#notifications-on-windows)) |
+| Line above the prompt | on | While the pane is closed, a line above the prompt reads as token-weather's does, with the pane's own context bar where token-weather draws its chart, and the agents at work after it: `☁ Cloudy  47%  94.0k / 200k  ████▊░░░░░  ▲ +23.7k last turn  ⠹ 2 running · 1 waiting`. Where token-weather's own line is there too, this one keeps only the agents at work |
 | Auto-update | on | Once a day, a copy installed from the marketplace checks GitHub for a newer version and installs it (see [Updates](#updates)) |
 
 ### Global or this session only
@@ -187,6 +187,14 @@ Claude Code updates plugins from a marketplace only where that marketplace has a
 
 Claude Code's own auto-update can be switched on for this marketplace too: `/plugin` → Marketplaces → `forge-agent-tree` → enable auto-update.
 
+## Token optimization
+
+We are working on ways to spend fewer tokens without getting worse answers. The first, **knowledge base optimization**, splits a project's large instruction file into a small core and topic files that the model reads only when a task needs them. It is still an experiment and not in the mod yet. When it ships, it will run only when you ask for it.
+
+The second, **delegation hints**, is still at the research stage. When a task can be split, the model would hand parts of it to subagents, each on a model and an effort level that fit the part.
+
+We document it openly: the method, the measurements, the costs and the mistakes are in [TOKEN_OPTIMIZATION.md](TOKEN_OPTIMIZATION.md).
+
 ## Develop
 
 ```bash
@@ -200,7 +208,7 @@ Files:
 - `hooks/model.ts`: state changes as pure functions.
 - `hooks/layout.ts`: the pane as rows sized to its columns and rows.
 - `hooks/format.ts`: names, numbers and widths; times in the pane's language.
-- `hooks/words.ts` and `hooks/langs-*.ts`: the pane's words in each of its 23 languages.
+- `hooks/words.ts` and `hooks/langs-*.ts`: the pane's words in each of its 24 languages.
 - `hooks/update.ts`: the daily update check, as pure decisions.
 - `types/index.d.ts`: the `$.state` contract.
 

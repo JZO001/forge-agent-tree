@@ -161,7 +161,11 @@ export function percent(p: number, estimated = false): string {
   return estimated ? `~${whole}`.padStart(5) : whole.padStart(4)
 }
 
-export type Weather = { icon: string; word: string; color: string }
+/** The weather's name, by which the pane's words name it (`Words.weather`). */
+export type WeatherKey = 'clear' | 'cloudy' | 'showers' | 'storm' | 'compact'
+
+/** `word`: token-weather's own English word; the pane says it in its language (`Words.weather[key]`). */
+export type Weather = { icon: string; word: string; key: WeatherKey; color: string }
 
 /** The cell a weather sign drawn as a two-cell emoji covers (Windows Terminal): a space of its own. */
 export const EMOJI_ROOM = ' '
@@ -183,11 +187,11 @@ export function weatherFor(p: number): Weather {
   // over the cell after it; the text-form selector (U+FE0E) did not stop it
   // (the user's live check of 2026-11-19, status.jpg). So a space of their own
   // follows them, which the emoji covers, and the cell after stays clear.
-  if (p < 25) return { icon: `☀${EMOJI_ROOM}`, word: 'Clear', color: 'yellow' }
-  if (p < 50) return { icon: `☁${EMOJI_ROOM}`, word: 'Cloudy', color: 'cyan' }
-  if (p < 75) return { icon: `☂${EMOJI_ROOM}`, word: 'Showers', color: 'blue' }
-  if (p < 90) return { icon: '☇', word: 'Storm', color: 'magenta' }
-  return { icon: '↯', word: 'Compact soon', color: 'red' }
+  if (p < 25) return { icon: `☀${EMOJI_ROOM}`, word: 'Clear', key: 'clear', color: 'yellow' }
+  if (p < 50) return { icon: `☁${EMOJI_ROOM}`, word: 'Cloudy', key: 'cloudy', color: 'cyan' }
+  if (p < 75) return { icon: `☂${EMOJI_ROOM}`, word: 'Showers', key: 'showers', color: 'blue' }
+  if (p < 90) return { icon: '☇', word: 'Storm', key: 'storm', color: 'magenta' }
+  return { icon: '↯', word: 'Compact soon', key: 'compact', color: 'red' }
 }
 
 /** The weather's color of a context share. */

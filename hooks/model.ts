@@ -56,6 +56,46 @@ export function orphaned(s: TreeState, present: ReadonlySet<string>, now: number
   }
 }
 
+/**
+ * After a session swap (plan 19 §8): what the old tree still has at work goes
+ * on in the new one, as the process runs it on. Every run not ended, whole: its
+ * finished agents too, so its counts stay right (a workflow's agents are never
+ * in the agent list; the run's notification, which reaches the new session,
+ * ends them). Every agent at work outside a run that the new session's list
+ * still shows, with its record (its start, tools, model), not as one found
+ * anew; one the list no longer shows stays behind, or it would work forever.
+ * The nodes those hang under come along, so nothing loses its place. The log
+ * does not: the swap starts a new tree.
+ */
+export function carriedOver(from: TreeState, into: TreeState, listedIds: ReadonlySet<string>): TreeState {
+  const haveRuns = new Set((into.runs ?? []).map(r => r.id))
+  const haveAgents = new Set(into.agents.map(a => a.id))
+  const runs = new Map((from.runs ?? []).filter(r => !runEnded(r) && !haveRuns.has(r.id)).map(r => [r.id, r]))
+  const byId = new Map(from.agents.map(a => [a.id, a]))
+  const agents = new Map<string, TreeAgent>()
+  const take = (a: TreeAgent): void => {
+    if (agents.has(a.id) || haveAgents.has(a.id)) return
+    agents.set(a.id, a)
+    // the agent it hangs under, and that one's own
+    const parent = a.parentId === undefined ? undefined : byId.get(a.parentId)
+    if (parent) take(parent)
+  }
+  for (const a of from.agents) {
+    const run = a.run === undefined ? undefined : runOf(from, a.run)
+    if (run ? runs.has(run.id) : isActive(a) && listedIds.has(a.id)) take(a)
+  }
+  // a run carried over keeps the agent that called the Workflow tool
+  for (const r of runs.values()) {
+    const caller = r.parentId === undefined ? undefined : byId.get(r.parentId)
+    if (caller) take(caller)
+  }
+  if (runs.size === 0 && agents.size === 0) return into
+  // in the old tree's order, before what the new session holds: they started first
+  const kept = from.agents.filter(a => agents.has(a.id))
+  const keptRuns = (from.runs ?? []).filter(r => runs.has(r.id))
+  return { ...into, agents: [...kept, ...into.agents], runs: [...keptRuns, ...(into.runs ?? [])] }
+}
+
 export function effortText(effort: string | number | undefined): string | undefined {
   return effort === undefined ? undefined : String(effort)
 }
@@ -422,6 +462,26 @@ export function toolCalled(
   }))
 }
 
+/**
+ * A subagent's call was put to the person (a permission dialog, `tool.check`'s
+ * `ask` with `approver: 'person'`): the agent waits for them from now until the
+ * call runs or is refused (plan 19 §7; the list says `running` all along,
+ * measured live on 2026-11-23). An ended or unknown agent is left as it is.
+ */
+export function asked(s: TreeState, agentId: string, callId: string, now: number): TreeState {
+  const a = s.agents.find(x => x.id === agentId)
+  if (!a || !isActive(a) || a.asking === callId) return s
+  const next = patchAgent(s, agentId, x => ({ ...x, asking: callId, ...(x.state === 'waiting' ? {} : { state: 'waiting' as const, since: now }) }))
+  return a.state === 'waiting' ? next : withLog(next, { at: now, kind: 'waiting', agentId, label: labelOf(a), text: 'waiting', say: { phrase: 'waiting' } })
+}
+
+/** The call put to the person runs, was refused or went (`tool.run`, `tool.call` settled): its agent is at work again. */
+export function answered(s: TreeState, callId: string, now: number): TreeState {
+  const a = s.agents.find(x => x.asking === callId)
+  if (!a) return s
+  return patchAgent(s, a.id, x => ({ ...x, asking: undefined, ...(x.state === 'waiting' ? { state: 'running' as const, since: now } : {}) }))
+}
+
 /** A prompt's first line, as the main row shows it; none for a background task's notification, which is no prompt of the person's. */
 function promptLine(text: string): string | undefined {
   const first = text.split('\n').map(line => line.trim()).find(line => line.length > 0)
@@ -438,11 +498,24 @@ export function prompted(s: TreeState, text: string): TreeState {
   return prompt === undefined || prompt === s.main.prompt ? s : { ...s, main: { ...s.main, prompt } }
 }
 
-export function turnStarted(s: TreeState, agentId: string | undefined, text: string, now: number): TreeState {
+/**
+ * The person sent a prompt while main works: it goes into the running turn
+ * (no turn starts for it), so that turn is theirs from now (plan 19 §6).
+ */
+export function personInTurn(s: TreeState): TreeState {
+  return s.main.isBusy && s.main.turnByPerson !== true ? { ...s, main: { ...s.main, turnByPerson: true } } : s
+}
+
+/**
+ * A turn starts. On main, `byPerson` says whether the person's own prompt woke
+ * it (the `prompt.submit` just before it; `turn.start` carries no origin), not
+ * a background task's notification, a scheduled prompt or another session.
+ */
+export function turnStarted(s: TreeState, agentId: string | undefined, text: string, now: number, byPerson?: boolean): TreeState {
   if (!agentId) {
     // A background task's notification wakes main too: it keeps the prompt it had.
     const prompt = promptLine(text) ?? s.main.prompt
-    return { ...s, main: { ...s.main, isBusy: true, turnStartedAt: now, activity: undefined, prompt } }
+    return { ...s, main: { ...s.main, isBusy: true, turnStartedAt: now, activity: undefined, prompt, turnByPerson: byPerson } }
   }
   if (!s.agents.some(a => a.id === agentId)) return { ...s, agents: [...s.agents, placeholder(agentId, now)] }
   return patchAgent(s, agentId, a =>
@@ -516,7 +589,12 @@ export function stepped(s: TreeState, f: StepFacts, now: number): TreeState {
 export type EndFacts = { agentId?: string; reason: EndReason }
 
 export function turnCompleted(s: TreeState, f: EndFacts, now: number): TreeState {
-  if (!f.agentId) return { ...s, main: { ...s.main, isBusy: false, turnEndedAt: now } }
+  if (!f.agentId) {
+    // Its end tells nothing where the person pressed Esc (they are there), or
+    // where they did not start it (plan 19 §5, §6). Unknown counts as theirs.
+    const quiet = f.reason === 'aborted' || s.main.turnByPerson === false
+    return { ...s, main: { ...s.main, isBusy: false, turnEndedAt: now, turnQuiet: quiet } }
+  }
   const a = s.agents.find(x => x.id === f.agentId)
   if (!a) return s
   // The list saw the end first: keep its record, add the reason, log nothing twice.
@@ -853,8 +931,11 @@ export function listed(s: TreeState, list: readonly ListedAgent[], now: number):
   let next = s
   const present = new Set(list.map(x => x.id))
   for (const info of list) {
-    const state = STATUS[info.status] ?? 'running'
+    const said = STATUS[info.status] ?? 'running'
     const a = next.agents.find(x => x.id === info.id)
+    // An agent waiting on the person's answer to a call stays waiting while the
+    // list says it works (it does through a permission dialog); an end ends it.
+    const state: AgentState = a?.asking !== undefined && a.state === 'waiting' && !ENDED.has(said) ? 'waiting' : said
     if (!a) {
       const agent: TreeAgent = {
         id: info.id,

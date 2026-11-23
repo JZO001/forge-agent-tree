@@ -33,12 +33,15 @@ import type { LimitThresholds } from './format'
 import { ADVISOR_OFFER, BAND_GAP, DEFAULT_SETTINGS, OPTION_FIELDS, agentOffer, aliasOf, bandLine, fieldKey, hasLiveCell, isButton, layout, runOpen, themeKind } from './layout'
 import type { Press, Row, Seg, Settings, ThemeKind } from './layout'
 import { SOUND_BEEPS, SOUND_OPTION, heardChanges, heardOf, nextSound, soundEventsOf, soundFile } from './sounds'
-import { NOTICE_DELAY_MS, NOTICE_OPTION, nextNotices, noticeText, noticesOf, testSaid, toastScript } from './notices'
+import { NOTICE_GAP_S, NOTICE_OPTION, nextNotices, noticeDelay, noticeText, noticesOf, testSaid, toastScript } from './notices'
 import type { Notice, NoticeEvent, NoticeQueue } from './notices'
 import { BOOT_MS, EFFECT_MS, effectsEnd } from './hud'
 import type { Heard, SoundEvent, SoundQueue } from './sounds'
 import {
   anyActive,
+  answered,
+  asked,
+  carriedOver,
   compacted,
   configured,
   effortText,
@@ -54,6 +57,7 @@ import {
   rememberedLimits,
   measured,
   orphaned,
+  personInTurn,
   prompted,
   runLaunched,
   runNoticed,
@@ -103,6 +107,13 @@ const IDLE_SHIMMER_TICKS = 2
 const CLOCK_REDRAW_MS = 60_000
 /** How often the settings are read again for the advisor: /advisor saves there, from any session. */
 const SETTINGS_EVERY_MS = 10_000
+/**
+ * The look (the theme, reduced motion) is read every this many ticks (1 s),
+ * idle too, so a /theme reaches the HUD's colors within a second (plan 19 §1).
+ * A `settings.read` hook was tried first: where another plugin hooks it ahead
+ * (`cc-plugin-sec-default`) the engine skips ours, and says so in the conversation.
+ */
+const LOOK_TICKS = 8
 /** How long a /model or /effort the pane ran may take to take effect: it waits until Claude is idle. */
 const PENDING_MS = 10 * 60_000
 /** A session's record in the store (its subagent choices) is kept this long, and at most this many. */
@@ -173,6 +184,64 @@ function change(fn: (s: TreeState) => TreeState): void {
     dirty = true
   } else {
     pending.push(fn)
+  }
+}
+
+/**
+ * Whether the last prompt.submit was the person's own (typed, Remote Control,
+ * -p): main's next `turn.start`, which carries no origin, takes it (plan 19 §6).
+ * Set and read synchronously in the hooks, so no note's order can swap them.
+ */
+let wokeByPerson = false
+
+/** token-weather's row, by the plugin that drew it in the band (a skills folder's copy, a marketplace's). */
+const WEATHER_PLUGIN = /^token-weather(@|$)/
+/**
+ * Whether token-weather's own row stood in the band when it last settled: the
+ * band line then says only what of the agents works or waits (plan 19 §2).
+ * Read by the next drawing; never $.state, which a drawing may not write.
+ */
+let weatherShown = false
+
+/** Ticks after a paging press its focus is asked again, on the page drawn by then (250 ms; plan 19 §3). */
+const FOCUS_AGAIN_TICKS = 2
+/** A paging press's focus, to ask again once the new page is drawn. */
+let focusSoon: { key: string; at: number } | undefined
+
+/**
+ * Ticks a subagent's call put to the person waits before its agent shows as
+ * waiting (1 s; plan 19 §7): in auto mode the classifier takes the ask over
+ * right after the verdict (`tool.judge`), and that is no wait for the person.
+ */
+const ASK_GRACE_TICKS = 8
+/** Calls put to the person, not yet shown as a wait: `tool_use_id` → the agent and the tick of the ask. */
+const asks = new Map<string, { agentId: string; tick: number }>()
+/** Calls auto mode's classifier took over (`tool.judge`): a verdict's ask arriving after it shows no wait. */
+const judged = new Set<string>()
+
+/** A call put to the person: its agent shows as waiting once the grace has passed with no classifier. */
+function askedOf(agentId: string, callId: string, tick: number): void {
+  if (!judged.has(callId)) asks.set(callId, { agentId, tick })
+}
+
+/** The call runs, was refused or went: whatever waited on it is over. */
+function answeredOf($: EngineInterface, callId: string): void {
+  asks.delete(callId)
+  judged.delete(callId)
+  note($, (s, now) => answered(s, callId, now))
+}
+
+/** Whether an agent of the tree waits on this call (or a session swap holds the changes back). */
+function waitsOn(callId: string): boolean {
+  return holding || mem?.agents.some(a => a.asking === callId) === true
+}
+
+/** Asks whose grace has passed: their agents wait for the person from now. */
+function showAsks($: EngineInterface): void {
+  for (const [callId, ask] of asks) {
+    if (ticks - ask.tick < ASK_GRACE_TICKS) continue
+    asks.delete(callId)
+    note($, (s, now) => asked(s, ask.agentId, callId, now))
   }
 }
 
@@ -251,11 +320,22 @@ async function tick($: EngineInterface): Promise<void> {
   const idleShimmer = animate && shimmering
   // A sound waiting its turn plays as soon as its turn comes, not at the idle pace.
   const sounding = Object.keys(soundQueue).length > 0
-  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && !sounding && !pageFits && ticks % IDLE_TICKS !== 0) return
+  const lookDue = ticks % LOOK_TICKS === 0
+  if (!busy && !pollSoon && !dirty && !watching && !idleShimmer && !sounding && !pageFits && !lookDue && !focusSoon && asks.size === 0 && ticks % IDLE_TICKS !== 0) return
   ticking = true
   try {
     const now = await $.clock.now()
     if (watching && now > watchSwapUntil) watchSwapUntil = 0
+    // A subagent's call put to the person, its grace passed: it waits for them.
+    if (asks.size > 0) showAsks($)
+    // A paging press's ring, asked again now that the new page is drawn (plan 19 §3).
+    if (focusSoon && ticks >= focusSoon.at) {
+      const key = focusSoon.key
+      focusSoon = undefined
+      void $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
+    }
+    // The theme and reduced motion: a change draws the pane again (it reads them from $.state).
+    if (lookDue) await readLook($)
     if (pageFits) {
       pageFits = false
       await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, treeAt: undefined })).catch(() => undefined)
@@ -273,8 +353,6 @@ async function tick($: EngineInterface): Promise<void> {
     if (due && now - lastSettings >= SETTINGS_EVERY_MS) {
       lastSettings = now
       await readOffer($)
-      // The theme and reduced motion: a change draws the pane again (it reads them from $.state).
-      await readLook($)
       const advisor = await advisorSetting($)
       if (mem) {
         const next = advisorSet(mem, advisor)
@@ -341,7 +419,8 @@ async function adopt($: EngineInterface, now: number): Promise<void> {
         limitsEstimated: s.main.limits ? s.main.limitsEstimated : before.main.limitsEstimated,
       },
     }
-    mem = listed(s, list.map(fromInfo), now)
+    // What the old tree still has at work goes on here: the process runs it on (plan 19 §8).
+    mem = listed(carriedOver(before, s, new Set(list.map(a => a.id))), list.map(fromInfo), now)
   } finally {
     holding = false
     catchUp()
@@ -649,23 +728,25 @@ function listen($: EngineInterface, now: number): void {
     lastSounds.any = now
     void playSound($, event).catch(() => undefined)
   }
-  const notices = nextNotices(noticeQueue, noticesOf(changes, mem, wordsFor(lang), thresholds), e => noticeOn(current, e), lastNotices, now)
+  const gapMs = noticeGapOf(current) * 1000
+  const notices = nextNotices(noticeQueue, noticesOf(changes, mem, wordsFor(lang), thresholds), e => noticeOn(current, e), lastNotices, now, gapMs)
   noticeQueue = notices.queue
   for (const n of notices.send) {
     lastNotices[n.event] = now
-    sendNotice($, n)
+    sendNotice($, n, noticeDelay(gapMs))
   }
 }
 
 /**
  * Sends a notification through the person's own channel (plan 12), never
- * awaited: a host (the desktop app, a remote client) holds it NOTICE_DELAY_MS
- * and drops it if they come back first; a terminal sends it now. One key a
- * kind, so a host's newer one replaces the older. One not sent says nothing
- * (the notifications page shows it); a refusal rejects, and that is caught.
+ * awaited: a host (the desktop app, a remote client) holds it `delayMs` (20 s,
+ * or the gap where that is shorter: `noticeDelay`) and drops it if they come
+ * back first; a terminal sends it now. One key a kind, so a host's newer one
+ * replaces the older. One not sent says nothing (the notifications page shows
+ * it); a refusal rejects, and that is caught.
  */
-function sendNotice($: EngineInterface, n: Notice): void {
-  void deliver($, noticeText(n, wordsFor(lang)), { title: TITLE, key: `forge:${n.event}`, delayMs: NOTICE_DELAY_MS, untilBack: true }, n.event).catch(() => undefined)
+function sendNotice($: EngineInterface, n: Notice, delayMs: number): void {
+  void deliver($, noticeText(n, wordsFor(lang)), { title: TITLE, key: `forge:${n.event}`, delayMs, untilBack: true }, n.event).catch(() => undefined)
 }
 
 /**
@@ -852,6 +933,7 @@ function settingsOf(options: Options, locked: readonly string[] = lockedOptions)
       notifyRun: flag('notifyRun'),
       notifyTurn: flag('notifyTurn'),
       notifyAlert: flag('notifyAlert'),
+      noticeGap: noticeGapOf(options),
       autoUpdate: flag('autoUpdate'),
     },
     locked: OPTION_FIELDS.filter(f => locked.includes(f)),
@@ -871,6 +953,11 @@ function whole(value: unknown, fallback: number, lo: number, hi: number): number
 /** How many log rows the pane shows (0 to 20). */
 function logRowsOf(options: Options): number {
   return whole(options.logRows, 5, 0, 20)
+}
+
+/** One notification of a kind at most this often, in seconds (0 to 600; 0 sends each at once; plan 19 §4). */
+function noticeGapOf(options: Options): number {
+  return whole(options.noticeGap, NOTICE_GAP_S, 0, 600)
 }
 
 /** Where the limit bars turn yellow and red; red at least one point above yellow. */
@@ -1050,6 +1137,18 @@ async function pressed($: EngineInterface, press: Press): Promise<void> {
       // The whole tree a page at a time from this row (plan 13); none, back to the rows that matter most.
       const at = press.at
       await update($, uiState, (u: TreeUi): TreeUi => ({ ...u, treeAt: at }))
+      // The redraw hands the buttons new handles, and the engine matches the ring
+      // by handle: it would land elsewhere. It goes where the press says, as the
+      // message field's does, not awaited (plan 19 §3).
+      const focus = press.focus
+      if (focus !== undefined) {
+        void $.ui.focus({ requestId: PANE, key: focus }).catch(() => undefined)
+        // Asked at once, the ring can land on the button the page is about to
+        // replace: where the key is drawn before and after (`▼` to `▼`), the
+        // engine does not wait for the new drawing (the live check of 2026-11-23:
+        // `moved`, then the ring fell to a row's ✎). Asked again once it is drawn.
+        focusSoon = { key: focus, at: ticks + FOCUS_AGAIN_TICKS }
+      }
       return
     }
     case 'testNotice': {
@@ -1475,7 +1574,11 @@ export const register: Register = (on, options: Options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', ($, e, next) => {
-    note($, (s, now) => turnStarted(s, e.agentId, e.text, now))
+    // `turn.start` carries no origin: on main, the prompt.submit just before it
+    // says who woke the turn (plan 19 §6). A turn with none before it is not the person's.
+    const byPerson = e.agentId === undefined ? wokeByPerson : undefined
+    if (e.agentId === undefined) wokeByPerson = false
+    note($, (s, now) => turnStarted(s, e.agentId, e.text, now, byPerson))
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1535,6 +1638,69 @@ export const register: Register = (on, options: Options) => {
         () => undefined,
       )
     }
+    // A subagent's call settled (ran, or the person refused it: an error result):
+    // whatever waited on the person's answer to it is over (plan 19 §7).
+    const callId = typeof input.tool_use_id === 'string' && input.tool_use_id ? input.tool_use_id : undefined
+    if (e.agentId !== undefined && callId !== undefined) {
+      const over = (): void => answeredOf($, callId)
+      void Promise.resolve(ran).then(over, over)
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // A subagent's call put to the person (plan 19 §7): the verdict `ask` where a
+  // person answers. The list says `running` through the dialog (measured live,
+  // 2026-11-23), so the agent shows as waiting from here, after a short grace
+  // in which auto mode's classifier may take the ask over. Read after `next`,
+  // unawaited; passed on unchanged.
+  on('tool.check', ($, e, next) => {
+    const verdict = next(e)
+    const agentId = e.agentId
+    const callId = e.tool_use_id
+    if (agentId !== undefined && callId !== undefined && e.approver === 'person') {
+      void Promise.resolve(verdict).then(
+        r => {
+          if (r.decision === 'ask') askedOf(agentId, callId, ticks)
+        },
+        () => undefined,
+      )
+    }
+    return verdict
+  }).catch(($, e, next) => next(e))
+
+  // Auto mode's classifier judges the call: no wait for the person, unless it
+  // gives no verdict (`ask`) and the call goes to them after all. Passed on unchanged.
+  on('tool.judge', ($, e, next) => {
+    const verdict = next(e)
+    const agentId = e.agentId
+    const callId = e.tool_use_id
+    if (agentId !== undefined) {
+      judged.add(callId)
+      asks.delete(callId)
+      if (waitsOn(callId)) note($, (s, now) => answered(s, callId, now))
+      void Promise.resolve(verdict).then(
+        r => {
+          if (r.decision !== 'ask' || !judged.has(callId)) return
+          judged.delete(callId)
+          askedOf(agentId, callId, ticks - ASK_GRACE_TICKS)
+        },
+        () => undefined,
+      )
+    }
+    return verdict
+  }).catch(($, e, next) => next(e))
+
+  // The call was allowed and runs: the person answered (or nobody had to).
+  // `next(e)` first, nothing after it may throw: a second `next(e)` would refuse the call.
+  on('tool.run', ($, e, next) => {
+    const ran = next(e)
+    try {
+      const input = e as unknown as Readonly<Record<string, unknown>>
+      const callId = typeof input.tool_use_id === 'string' && input.tool_use_id ? input.tool_use_id : undefined
+      if (e.agentId !== undefined && callId !== undefined && (asks.has(callId) || judged.has(callId) || waitsOn(callId))) answeredOf($, callId)
+    } catch {
+      // The call runs whatever became of the tree.
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -1545,6 +1711,12 @@ export const register: Register = (on, options: Options) => {
     // command's line nor a hidden one: the main row shows it at once, though one
     // typed while a turn runs starts no turn of its own.
     const own = e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' || e.origin?.kind === 'sdk'
+    // Who wakes main's next turn: every wake (a task's notification, a scheduled
+    // prompt, another session) comes through here first. A command the person
+    // typed counts as theirs: they wait for its answer (plan 19 §6, question 7).
+    // One sent while a turn runs goes into it: that turn is theirs from now.
+    wokeByPerson = own
+    if (own) note($, st => personInTurn(st))
     if (own && e.command === undefined && e.isMeta !== true) {
       const text = e.text
       note($, st => prompted(st, text))
@@ -1674,7 +1846,7 @@ export const register: Register = (on, options: Options) => {
     const ui = await read($, uiState)
     const f = await read($, frameAtom)
     const look = await read($, lookAtom)
-    const line = bandLine(s, e.props.bodyColumns, { frame: f, animate: motionOf(options, look), lang: ui.lang })
+    const line = bandLine(s, e.props.bodyColumns, { frame: f, animate: motionOf(options, look), lang: ui.lang, weatherShown })
     if (line.length === 0) return next(e)
     const { Text } = $.ui.resolve(e)
     return (
@@ -1685,6 +1857,19 @@ export const register: Register = (on, options: Options) => {
         ])}
       </Text>
     )
+  }).catch(($, e, next) => next(e))
+
+  // The band as it settled: where token-weather's own row is in it, ours keeps
+  // only the agents' part, so the two never say the same twice (plan 19 §2,
+  // question 3). The rows pass on as they came: no other plugin's row is
+  // touched. A change draws the band again, once.
+  on('ui.render', { component: 'AbovePromptList' }, async ($, e, next) => {
+    const shown = e.props.rows.some(r => r.plugin !== $.plugin.name && WEATHER_PLUGIN.test(r.plugin))
+    if (shown !== weatherShown) {
+      weatherShown = shown
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
